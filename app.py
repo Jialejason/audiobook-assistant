@@ -21,7 +21,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手")
 st.caption(
-    "终极无损版：金句卡 100% 完整呈现(绝不硬截断/无省略号) + 95分精炼算法 + 纯净听书"
+    "云端完美版：跨平台字体自适应(完美解决方框Bug) + 95分精炼算法 + 纯净听书"
 )
 
 # --------------------------------------------------
@@ -116,11 +116,11 @@ else:
                 if text_page:
                     raw_text += text_page + "\n"
         st.success(f"成功导入文件，共读取到 {len(raw_text)} 个字符！")
+
 # --------------------------------------------------
-# 5. 音色选择（丰富扩充版）
+# 5. 音色选择
 # --------------------------------------------------
 VOICE_MAP = {
-    # 常用精选
     "zh-CN-XiaoruiNeural": "🌸 Xiaorui - 柔和少女 / 清新可人 (推荐少女音)",
     "zh-CN-XiaoyiNeural": "🎀 Xiaoyi - 娇软萌妹 / 甜美萝莉音",
     "zh-CN-XiaoxiaoNeural": "💃 Xiaoxiao - 经典御姐 / 知性温婉",
@@ -128,21 +128,15 @@ VOICE_MAP = {
     "zh-CN-YunjianNeural": "💼 Yunjian - 沉稳解说 / 商务男声",
     "zh-TW-HsiaoChenNeural": "🍵 HsiaoChen - 台湾腔 / 软萌甜美",
     "zh-HK-HiuMaanNeural": "🇭🇰 HiuMaan - 标准粤语 / 港台风情",
-    
-    # 更多播音、男声与儿童音
     "zh-CN-YunyangNeural": "📢 Yunyang - 专业新闻播音 / 正气男声",
     "zh-CN-XiaozhenNeural": "📖 Xiaozhen - 故事绘本 / 亲切女声",
     "zh-CN-YunfengNeural": "🎬 Yunfeng - 影视解说 / 沉稳男声",
     "zh-CN-YunhaoNeural": "👦 Yunhao - 活力少男 / 朝气澎湃",
-    
-    # 特色方言
     "zh-CN-LN-XiaobeiNeural": "🗣️ Xiaobei - 东北方言 / 豪爽风趣",
     "zh-CN-SC-YunxiNeural": "🌶️ Yunxi - 四川方言 / 辣味亲切",
     "zh-CN-SD-YunxiangNeural": "🌾 Yunxiang - 山东方言 / 朴实厚重",
     "zh-HK-WanLungNeural": "🇭🇰 WanLung - 粤语男声 / 稳重成熟",
     "zh-TW-YunJheNeural": "🍵 YunJhe - 台湾腔男声 / 自然流畅",
-    
-    # 英文音色
     "en-US-JennyNeural": "🇺🇸 Jenny - 美音女声 / 自然清晰",
     "en-US-GuyNeural": "🇺🇸 Guy - 美音男声 / 商务稳重",
     "en-GB-SoniaNeural": "🇬🇧 Sonia - 英音女声 / 优雅地道",
@@ -237,14 +231,20 @@ async def generate_audio_bytes_safe(text, voice):
     return bytes(full_audio)
 
 # --------------------------------------------------
-# 7. 温馨插画与无限自适应金句卡引擎【无损不截断】
+# 7. 跨平台自适应字库引擎（完美支持 Linux 云端与本地 Windows）
 # --------------------------------------------------
 def get_chinese_font(font_size=20):
     font_paths = [
+        # Streamlit Cloud / Linux 云端常见中文字体路径
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        # Windows 本地常见字体路径
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/simsun.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        # Mac 本地常见字体路径
         "/System/Library/Fonts/PingFang.ttc"
     ]
     for path in font_paths:
@@ -256,7 +256,6 @@ def get_chinese_font(font_size=20):
     return ImageFont.load_default()
 
 def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
-    # 根据文本字数自动排版分行
     quote_len = len(quote_text)
     if quote_len <= 35:
         font_size, chars_per_line, line_height = 22, 20, 40
@@ -273,7 +272,6 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     font_badge = get_chinese_font(13)
     font_big = get_chinese_font(70)
 
-    # 拆分所有行，不做任何省略剪裁！
     lines = []
     line = ""
     for char in quote_text:
@@ -284,7 +282,6 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     if line:
         lines.append(line)
 
-    # 动态计算所需的画布总高度（字多自动拉长卡片）
     width = 750
     needed_text_h = len(lines) * line_height
     height = max(480, 200 + needed_text_h)
@@ -320,7 +317,6 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     img = Image.new("RGBA", (width, height))
     draw = ImageDraw.Draw(img)
     
-    # 画背景
     for y in range(height):
         r = int(s["bg_top"][0] + (s["bg_bot"][0] - s["bg_top"][0]) * (y / height))
         g = int(s["bg_top"][1] + (s["bg_bot"][1] - s["bg_top"][1]) * (y / height))
@@ -331,12 +327,10 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     card_rect = [margin, margin, width - margin, height - margin]
     draw.rounded_rectangle(card_rect, radius=24, fill=s["card_bg"])
 
-    # 水印与标题
     draw.text((margin + 30, margin + 40), "“", fill=s["quote_mark"], font=font_big)
     draw.text((width - margin - 80, height - margin - 110), "”", fill=s["quote_mark"], font=font_big)
     draw.text((margin + 45, margin + 35), "🌿 每日精华金句卡", fill=s["accent"], font=font_title)
 
-    # 全量文本绘制
     y_offset = margin + 95
     for l in lines:
         bbox = draw.textbbox((0, 0), l, font=font_quote)
@@ -345,7 +339,6 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
         draw.text((x_center, y_offset), l, fill=s["text"], font=font_quote)
         y_offset += line_height
 
-    # 底部标签
     if keywords:
         x_badge = margin + 45
         y_badge = height - margin - 75
@@ -366,7 +359,7 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     return img_byte_arr.getvalue()
 
 # --------------------------------------------------
-# 8. 提炼引擎逻辑【保持高精度且不强行裁剪文本】
+# 8. 提炼引擎逻辑
 # --------------------------------------------------
 def clean_sentence_prefix(sentence):
     cleaned = sentence.strip()
@@ -479,7 +472,6 @@ def extract_ultimate_local_insights(text):
             seen.add(s)
             unique_candidates.append(s)
 
-    # 完整保留句子，绝不动手裁剪或添加省略号！
     top_one_sentence = unique_candidates[0] if unique_candidates else "把握文章的核心逻辑与主旨概念。"
     top_points = unique_candidates[1:4] if len(unique_candidates) > 1 else unique_candidates[:1]
 
