@@ -1,0 +1,7 @@
+streamlit
+edge-tts
+beautifulsoup4
+requests
+Pillow
+pypdf
+jieba
