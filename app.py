@@ -21,7 +21,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手")
 st.caption(
-    "云端完美版：跨平台字体自适应(完美解决方框Bug) + 95分精炼算法 + 纯净听书"
+    "全领域动态自适应版：跨学科通用金句捕获引擎 + 无损金句卡 + 纯净听书"
 )
 
 # --------------------------------------------------
@@ -83,7 +83,7 @@ if input_mode == "✍️ 粘贴纯文本或网址(URL)":
     user_input = st.text_area(
         "粘贴文本或网址（以 http/https 开头）：",
         height=180,
-        placeholder="粘贴文章纯文本，或输入网页网址（如公众号/新闻链接）...\n提示：粘贴后直接点击下方【🚀 生成完整音频】或【⚡ 开始知识深度提炼】按钮即可！",
+        placeholder="粘贴任意书籍或文章纯文本，或输入网页网址...\n提示：粘贴后直接点击下方按钮即可动态智能提炼！",
     )
     if user_input.strip():
         text_candidate = user_input.strip()
@@ -231,20 +231,17 @@ async def generate_audio_bytes_safe(text, voice):
     return bytes(full_audio)
 
 # --------------------------------------------------
-# 7. 跨平台自适应字库引擎（完美支持 Linux 云端与本地 Windows）
+# 7. 跨平台自适应字库引擎
 # --------------------------------------------------
 def get_chinese_font(font_size=20):
     font_paths = [
-        # Streamlit Cloud / Linux 云端常见中文字体路径
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
         "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-        # Windows 本地常见字体路径
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/simsun.ttc",
-        # Mac 本地常见字体路径
         "/System/Library/Fonts/PingFang.ttc"
     ]
     for path in font_paths:
@@ -359,7 +356,7 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     return img_byte_arr.getvalue()
 
 # --------------------------------------------------
-# 8. 提炼引擎逻辑
+# 8. 全领域动态自适应提炼引擎【跨学科通用逻辑】
 # --------------------------------------------------
 def clean_sentence_prefix(sentence):
     cleaned = sentence.strip()
@@ -420,8 +417,9 @@ def extract_ultimate_local_insights(text):
     char_count = len(text)
     read_minutes = round(char_count / 300, 1)
 
+    # 1. 动态提取该文档专属的 TextRank 核心词（自动适应任意书籍的主题）
     auto_discovered_words = jieba.analyse.textrank(
-        text, topK=20, withWeight=False, allowPOS=("n", "vn", "nz", "nr", "nt")
+        text, topK=25, withWeight=False, allowPOS=("n", "vn", "nz", "nr", "nt")
     )
     for word in auto_discovered_words:
         if len(word) >= 2:
@@ -435,8 +433,9 @@ def extract_ultimate_local_insights(text):
     headings = []
     candidates = []
     data_sentences = []
+    total_paras = len(paragraphs)
 
-    for p in paragraphs:
+    for p_idx, p in enumerate(paragraphs):
         if len(p) < 22 and not any(p.endswith(x) for x in ["。", "！", "？"]):
             headings.append(p)
             continue
@@ -451,16 +450,30 @@ def extract_ultimate_local_insights(text):
                 if s_clean not in data_sentences and len(data_sentences) < 3:
                     data_sentences.append(clean_sentence_prefix(s_clean))
 
+            # 🌟 跨学科通用的动态加权体系（不绑定任何特定领域的名词）
             score = 0
             if s_idx == 0:
+                score += 2  # 段首自带天然主题权重
+            
+            # 权重1：动态命中了“当前这篇文章”自己的核心关键词（真正做到换书如换刀，动态适配）
+            if any(kw in s_clean for kw in keywords[:5]):
+                score += 4
+                
+            # 权重2：跨领域通用的底层逻辑与思考大词（适用于任何商业、科技、人文书籍）
+            if any(w in s_clean for w in ["底层", "核心", "关键", "本质", "原则", "总结", "规律", "逻辑", "机制", "结构", "核心是", "本质是"]):
+                score += 4
+                
+            # 权重3：跨领域通用的定义与结论性句式结构
+            if any(w in s_clean for w in ["等于", "意味着", "决定了", "在于", "归根结底", "换句话说", "核心在于", "关键在于", "则是"]):
+                score += 6
+                
+            # 权重4：位置加权（人类写作习惯：结论和金句往往分布在段落中后段或全书收尾处）
+            if p_idx >= total_paras * 0.5 or "总结" in p or "核心观点" in p or "结论" in p:
                 score += 3
-            if any(kw in s_clean for kw in keywords[:3]):
-                score += 2
-            if any(w in s_clean for w in ["底层", "核心", "关键", "本质", "原则", "总结", "规律"]):
-                score += 3
-            if score >= 3:
+
+            if score >= 5:
                 clean_s = clean_sentence_prefix(s_clean)
-                if clean_s and len(clean_s) > 10:
+                if clean_s and len(clean_s) > 12:
                     candidates.append((score, clean_s))
 
     candidates.sort(key=lambda x: x[0], reverse=True)
@@ -472,6 +485,7 @@ def extract_ultimate_local_insights(text):
             seen.add(s)
             unique_candidates.append(s)
 
+    # 动态捕获全篇最高分的核心结论作为一句话精髓
     top_one_sentence = unique_candidates[0] if unique_candidates else "把握文章的核心逻辑与主旨概念。"
     top_points = unique_candidates[1:4] if len(unique_candidates) > 1 else unique_candidates[:1]
 
@@ -549,7 +563,7 @@ with col2:
                         st.session_state.top_quote = top_quote
                         st.session_state.current_keywords = kws
             else:
-                with st.spinner("⚡ 正在使用自适应算法提取中..."):
+                with st.spinner("⚡ 正在通过全领域动态引擎深度提炼中..."):
                     summary_res, top_quote, kws = extract_ultimate_local_insights(raw_text)
                     st.session_state.local_summary = summary_res
                     st.session_state.top_quote = top_quote
