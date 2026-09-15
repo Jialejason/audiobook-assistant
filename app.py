@@ -22,7 +22,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手")
 st.caption(
-    "全领域动态自适应版：YouTube 视频多语种解析 + 跨学科金句引擎 + 全球母语听书"
+    "全领域动态自适应版：YouTube 智能突围引擎 + 跨学科金句引擎 + 全球母语听书"
 )
 
 # --------------------------------------------------
@@ -42,7 +42,7 @@ with st.sidebar:
     )
 
 # --------------------------------------------------
-# 3. 网页与 YouTube 抓取解析函数（已修复最新 API 兼容性）
+# 3. 网页与 YouTube 突围抓取解析函数
 # --------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_text_from_url(url):
@@ -89,15 +89,59 @@ def fetch_text_from_youtube(url):
     if not video_id:
         raise ValueError("无效的 YouTube 链接，请检查网址格式。")
     
+    # 策略 1：尝试标准官方 API
     try:
-        # 修复：使用最新版 youtube-transcript-api 实例的 fetch 方法
         ytt_api = YouTubeTranscriptApi()
         target_languages = ['zh-CN', 'zh-TW', 'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es']
         transcript_list = ytt_api.fetch(video_id, languages=target_languages)
         full_text = "\n".join([chunk.text for chunk in transcript_list])
-        return full_text
-    except Exception as e:
-        raise Exception(f"无法获取该视频的字幕（可能该视频未开启字幕或无公开字幕）: {e}")
+        if full_text.strip():
+            return full_text
+    except Exception:
+        pass
+
+    # 策略 2：通过全球公开去中心化 Invidious 节点矩阵突围云端 IP 封锁
+    invidious_nodes = [
+        "https://yewtu.be",
+        "https://vid.puffyan.us",
+        "https://invidious.projectsegfault.net",
+        "https://iv.ggtyler.dev"
+    ]
+    
+    for node in invidious_nodes:
+        try:
+            res = requests.get(f"{node}/api/v1/captions/{video_id}", timeout=6)
+            if res.status_code == 200:
+                data = res.json()
+                captions = data.get("captions", [])
+                if captions:
+                    target_cap = None
+                    for cap in captions:
+                        if any(l in cap.get("languageCode", "") for l in ["zh", "en", "ja"]):
+                            target_cap = cap
+                            break
+                    if not target_cap:
+                        target_cap = captions[0]
+                    
+                    cap_url = node + target_cap.get("url")
+                    vtt_res = requests.get(cap_url, timeout=8)
+                    if vtt_res.status_code == 200:
+                        vtt_text = vtt_res.text
+                        clean_lines = []
+                        for line in vtt_text.split("\n"):
+                            line = line.strip()
+                            if "-->" in line or not line or line.startswith("WEBVTT") or line.isdigit():
+                                continue
+                            clean_line = re.sub(r'<[^>]+>', '', line)
+                            if clean_line not in clean_lines:
+                                clean_lines.append(clean_line)
+                        full_text = "\n".join(clean_lines)
+                        if len(full_text) > 30:
+                            return full_text
+        except Exception:
+            continue
+
+    raise Exception("YouTube 云端防火墙拦截成功，所有突围中转节点均无响应。建议更换视频测试或在本地运行。")
 
 # --------------------------------------------------
 # 4. 多功能输入层（支持网页、YouTube、文件）
@@ -141,7 +185,7 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
         placeholder="https://youtu.be/..."
     )
     if yt_url.strip():
-        with st.spinner("🎬 正在提取 YouTube 视频多语言字幕对白..."):
+        with st.spinner("🎬 正在通过突围矩阵提取 YouTube 视频字幕对白..."):
             try:
                 raw_text = fetch_text_from_youtube(yt_url.strip())
                 st.success(f"🎉 YouTube 视频内容提取成功！共获取到 {len(raw_text)} 个字符的对白。")
