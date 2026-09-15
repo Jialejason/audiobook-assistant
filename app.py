@@ -11,6 +11,7 @@ import edge_tts
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
+from youtube_transcript_api import YouTubeTranscriptApi
 
 # --------------------------------------------------
 # 1. 页面基本配置
@@ -21,7 +22,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手")
 st.caption(
-    "全领域动态自适应版：跨学科通用金句捕获引擎 + 无损金句卡 + 纯净听书"
+    "全领域动态自适应版：YouTube 视频多语种解析 + 跨学科金句引擎 + 全球母语听书"
 )
 
 # --------------------------------------------------
@@ -41,7 +42,7 @@ with st.sidebar:
     )
 
 # --------------------------------------------------
-# 3. 网页抓取解析函数
+# 3. 网页与 YouTube 抓取解析函数
 # --------------------------------------------------
 def fetch_text_from_url(url):
     headers = {
@@ -67,13 +68,38 @@ def fetch_text_from_url(url):
     extracted_text = re.sub(r"\n\s*\n", "\n", extracted_text)
     return extracted_text
 
+def extract_youtube_id(url):
+    patterns = [
+        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
+        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def fetch_text_from_youtube(url):
+    video_id = extract_youtube_id(url)
+    if not video_id:
+        raise ValueError("无效的 YouTube 链接，请检查网址格式。")
+    
+    try:
+        # 支持中、英、日、韩、法、德等多语种字幕自动匹配
+        target_languages = ['zh-CN', 'zh-TW', 'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es']
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=target_languages)
+        full_text = "\n".join([item['text'] for item in transcript_list])
+        return full_text
+    except Exception as e:
+        raise Exception(f"无法获取该视频的字幕（可能该视频未开启字幕或无公开字幕）: {e}")
+
 # --------------------------------------------------
-# 4. 多功能输入层
+# 4. 多功能输入层（支持网页、YouTube、文件）
 # --------------------------------------------------
 st.subheader("📥 导入阅读内容")
 input_mode = st.radio(
     "选择输入方式：",
-    ["✍️ 粘贴纯文本或网址(URL)", "📁 上传文件 (.txt / .pdf)"],
+    ["✍️ 粘贴纯文本或网址(URL)", "🌐 粘贴 YouTube 视频链接", "📁 上传文件 (.txt / .pdf)"],
     horizontal=True,
 )
 
@@ -81,9 +107,9 @@ raw_text = ""
 
 if input_mode == "✍️ 粘贴纯文本或网址(URL)":
     user_input = st.text_area(
-        "粘贴文本或网址（以 http/https 开头）：",
+        "粘贴文本或网页网址（以 http/https 开头）：",
         height=180,
-        placeholder="粘贴任意书籍或文章纯文本，或输入网页网址...\n提示：粘贴后直接点击下方按钮即可动态智能提炼！",
+        placeholder="粘贴任意文章纯文本或输入网页网址...\n提示：粘贴后直接点击下方按钮即可动态智能提炼！",
     )
     if user_input.strip():
         text_candidate = user_input.strip()
@@ -102,6 +128,20 @@ if input_mode == "✍️ 粘贴纯文本或网址(URL)":
                     raw_text = user_input
         else:
             raw_text = user_input
+
+elif input_mode == "🌐 粘贴 YouTube 视频链接":
+    yt_url = st.text_input(
+        "请输入 YouTube 视频网址：",
+        placeholder="https://youtu.be/..."
+    )
+    if yt_url.strip():
+        with st.spinner("🎬 正在提取 YouTube 视频多语言字幕对白..."):
+            try:
+                raw_text = fetch_text_from_youtube(yt_url.strip())
+                st.success(f"🎉 YouTube 视频内容提取成功！共获取到 {len(raw_text)} 个字符的对白。")
+            except Exception as e:
+                st.error(f"提取失败: {e}")
+
 else:
     uploaded_file = st.file_uploader(
         "支持上传 .txt 或 .pdf 电子书文件", type=["txt", "pdf"]
@@ -118,16 +158,17 @@ else:
         st.success(f"成功导入文件，共读取到 {len(raw_text)} 个字符！")
 
 # --------------------------------------------------
-# 5. 音色选择
+# 5. 全球多语种音色选择
 # --------------------------------------------------
 VOICE_MAP = {
-    "zh-CN-XiaoruiNeural": "🌸 Xiaorui - 柔和少女 / 清新可人 (推荐少女音)",
-    "zh-CN-XiaoyiNeural": "🎀 Xiaoyi - 娇软萌妹 / 甜美萝莉音",
-    "zh-CN-XiaoxiaoNeural": "💃 Xiaoxiao - 经典御姐 / 知性温婉",
+    # --- 中文与方言区 ---
+    "zh-CN-XiaoxiaoNeural": "💃 Xiaoxiao - 经典御姐 / 知性温婉 (推荐)",
     "zh-CN-YunxiNeural": "🎙️ Yunxi - 磁性男主角 (小说听书推荐)",
-    "zh-CN-YunjianNeural": "💼 Yunjian - 沉稳解说 / 商务男声",
-    "zh-TW-HsiaoChenNeural": "🍵 HsiaoChen - 台湾腔 / 软萌甜美",
     "zh-HK-HiuMaanNeural": "🇭🇰 HiuMaan - 标准粤语 / 港台风情",
+    "zh-TW-HsiaoChenNeural": "🍵 HsiaoChen - 台湾腔 / 软萌甜美",
+    "zh-CN-XiaoruiNeural": "🌸 Xiaorui - 柔和少女 / 清新可人",
+    "zh-CN-XiaoyiNeural": "🎀 Xiaoyi - 娇软萌妹 / 甜美萝莉音",
+    "zh-CN-YunjianNeural": "💼 Yunjian - 沉稳解说 / 商务男声",
     "zh-CN-YunyangNeural": "📢 Yunyang - 专业新闻播音 / 正气男声",
     "zh-CN-XiaozhenNeural": "📖 Xiaozhen - 故事绘本 / 亲切女声",
     "zh-CN-YunfengNeural": "🎬 Yunfeng - 影视解说 / 沉稳男声",
@@ -137,9 +178,17 @@ VOICE_MAP = {
     "zh-CN-SD-YunxiangNeural": "🌾 Yunxiang - 山东方言 / 朴实厚重",
     "zh-HK-WanLungNeural": "🇭🇰 WanLung - 粤语男声 / 稳重成熟",
     "zh-TW-YunJheNeural": "🍵 YunJhe - 台湾腔男声 / 自然流畅",
-    "en-US-JennyNeural": "🇺🇸 Jenny - 美音女声 / 自然清晰",
-    "en-US-GuyNeural": "🇺🇸 Guy - 美音男声 / 商务稳重",
-    "en-GB-SoniaNeural": "🇬🇧 Sonia - 英音女声 / 优雅地道",
+    # --- 国际大语种区 ---
+    "en-US-JennyNeural": "🇺🇸 Jenny (美音) - 自然清晰 / 播客首选",
+    "en-US-GuyNeural": "🇺🇸 Guy (美音) - 商务稳重 / 男声解说",
+    "en-GB-SoniaNeural": "🇬🇧 Sonia (英音) - 优雅地道 / 英伦风情",
+    "ja-JP-NanamiNeural": "🇯🇵 Nanami (日语) - 甜美自然 / 亲切女声",
+    "ja-JP-KeitaNeural": "🇯🇵 Keita (日语) - 沉稳男声 / 动漫解说感",
+    "ko-KR-SunHiNeural": "🇰🇷 SunHi (韩语) - 温柔细腻 / 韩剧女声",
+    "ko-KR-InJoonNeural": "🇰🇷 InJoon (韩语) - 磁性男声 / 沉稳有力",
+    "fr-FR-DeniseNeural": "🇫🇷 Denise (法语) - 优雅浪漫 / 标准女声",
+    "de-DE-KatjaNeural": "🇩🇪 Katja (德语) - 严谨清晰 / 播音质感",
+    "es-ES-ElviraNeural": "🇪🇸 Elvira (西班牙语) - 热情明快",
 }
 voice_option = st.selectbox(
     "选择朗读音色：",
@@ -240,7 +289,7 @@ def get_chinese_font(font_size=20):
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
         "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
         "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/simhei.ttc",
         "C:/Windows/Fonts/simsun.ttc",
         "/System/Library/Fonts/PingFang.ttc"
     ]
@@ -417,7 +466,6 @@ def extract_ultimate_local_insights(text):
     char_count = len(text)
     read_minutes = round(char_count / 300, 1)
 
-    # 1. 动态提取该文档专属的 TextRank 核心词（自动适应任意书籍的主题）
     auto_discovered_words = jieba.analyse.textrank(
         text, topK=25, withWeight=False, allowPOS=("n", "vn", "nz", "nr", "nt")
     )
@@ -450,24 +498,19 @@ def extract_ultimate_local_insights(text):
                 if s_clean not in data_sentences and len(data_sentences) < 3:
                     data_sentences.append(clean_sentence_prefix(s_clean))
 
-            # 🌟 跨学科通用的动态加权体系（不绑定任何特定领域的名词）
             score = 0
             if s_idx == 0:
-                score += 2  # 段首自带天然主题权重
+                score += 2
             
-            # 权重1：动态命中了“当前这篇文章”自己的核心关键词（真正做到换书如换刀，动态适配）
             if any(kw in s_clean for kw in keywords[:5]):
                 score += 4
                 
-            # 权重2：跨领域通用的底层逻辑与思考大词（适用于任何商业、科技、人文书籍）
             if any(w in s_clean for w in ["底层", "核心", "关键", "本质", "原则", "总结", "规律", "逻辑", "机制", "结构", "核心是", "本质是"]):
                 score += 4
                 
-            # 权重3：跨领域通用的定义与结论性句式结构
             if any(w in s_clean for w in ["等于", "意味着", "决定了", "在于", "归根结底", "换句话说", "核心在于", "关键在于", "则是"]):
                 score += 6
                 
-            # 权重4：位置加权（人类写作习惯：结论和金句往往分布在段落中后段或全书收尾处）
             if p_idx >= total_paras * 0.5 or "总结" in p or "核心观点" in p or "结论" in p:
                 score += 3
 
@@ -485,7 +528,6 @@ def extract_ultimate_local_insights(text):
             seen.add(s)
             unique_candidates.append(s)
 
-    # 动态捕获全篇最高分的核心结论作为一句话精髓
     top_one_sentence = unique_candidates[0] if unique_candidates else "把握文章的核心逻辑与主旨概念。"
     top_points = unique_candidates[1:4] if len(unique_candidates) > 1 else unique_candidates[:1]
 
