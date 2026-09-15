@@ -128,7 +128,7 @@ def extract_youtube_id(url):
     return None
 
 # --------------------------------------------------
-# 4. 多功能输入层（支持单页网址、YouTube、文件、整本小说目录）
+# 4. 多功能输入层
 # --------------------------------------------------
 st.subheader("📥 导入阅读内容")
 input_mode = st.radio(
@@ -594,7 +594,7 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     return img_byte_arr.getvalue()
 
 # --------------------------------------------------
-# 8. 智能增强型本地提炼引擎（已升级：自动清洗小标题与噪声）
+# 8. 智能增强型本地提炼引擎（已升级：严格过滤标题与噪声）
 # --------------------------------------------------
 def clean_sentence_prefix(sentence):
     cleaned = sentence.strip()
@@ -612,10 +612,12 @@ def clean_sentence_prefix(sentence):
 
 def is_noise_or_heading(sentence):
     s = sentence.strip()
-    # 过滤掉章节小标题、结语、目录行
+    # 严格过滤掉标题、元数据、导读提示词、章节小标题
+    if any(kw in s for kw in ["深度领读", "导读", "作者：", "来源：", "点击上方", "关注我们", "原创说明"]):
+        return True
     if re.match(r'^(?:[一二三四五六七八九十]+[、\.\s]|\d+[、\.\s]|结语|总结|引言|前言|摘要|本章|一、|二、|三、|四、)', s):
         return True
-    if len(s) < 15 or len(s) > 100:
+    if len(s) < 15 or len(s) > 120:
         return True
     return False
 
@@ -682,12 +684,13 @@ def extract_ultimate_local_insights(text):
     headings = []
     candidates = []
     data_sentences = []
-    definition_sentences = [] # 专门搜寻定义句作为一句话精髓
-    total_paras = len(paragraphs)
-
+    definition_sentences = []
+    
     for p_idx, p in enumerate(paragraphs):
+        # 收集结构骨架（排除标题行）
         if len(p) < 22 and not any(p.endswith(x) for x in ["。", "！", "？"]):
-            headings.append(p)
+            if not any(kw in p for kw in ["深度领读", "导读"]):
+                headings.append(p)
             continue
 
         sentences = re.split(r"[。！!？\?]", p)
@@ -700,9 +703,10 @@ def extract_ultimate_local_insights(text):
                 if s_clean not in data_sentences and len(data_sentences) < 3:
                     data_sentences.append(clean_sentence_prefix(s_clean))
 
-            # 识别定义句或核心观点句
-            if any(w in s_clean for w in ["本质是", "意味着", "复利是", "核心在于", "视作", "规律", "杠杆"]):
-                definition_sentences.append(clean_sentence_prefix(s_clean))
+            # 寻找定义句或核心观点
+            if any(w in s_clean for w in ["本质是", "意味着", "复利是", "核心在于", "视作", "规律", "普适的"]):
+                if not any(kw in s_clean for kw in ["深度领读", "导读"]):
+                    definition_sentences.append(clean_sentence_prefix(s_clean))
 
             score = 0
             if s_idx == 0:
@@ -731,7 +735,7 @@ def extract_ultimate_local_insights(text):
             seen.add(s)
             unique_candidates.append(s)
 
-    # 智能挑选一句话精髓：优先选择定义句，如果没有则取第一个高质量候选句
+    # 智能挑选一句话精髓
     top_one_sentence = ""
     if definition_sentences:
         top_one_sentence = definition_sentences[0]
@@ -749,7 +753,7 @@ def extract_ultimate_local_insights(text):
 
     if headings:
         summary_md += "🧩 **文章结构骨架**：\n"
-        for h in headings[:5]:  # 只展示前5个有效骨架
+        for h in headings[:5]:
             summary_md += f"• **{h}**\n"
         summary_md += "\n"
 
