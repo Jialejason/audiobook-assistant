@@ -23,7 +23,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手")
 st.caption(
-    "全领域动态自适应版：CORS 跨域突围矩阵 + 跨学科金句引擎 + 全球母语听书"
+    "全领域动态自适应版：CORS 跨域突围矩阵 + 无字幕智能诊断 + 全球母语听书"
 )
 
 # --------------------------------------------------
@@ -84,6 +84,68 @@ def extract_youtube_id(url):
             return match.group(1)
     return None
 
+def clean_subtitles_text(raw_vtt):
+    clean_lines = []
+    for line in raw_vtt.split("\n"):
+        line = line.strip()
+        if "-->" in line or not line or line.startswith("WEBVTT") or line.isdigit() or re.match(r'^\d+:\d+', line):
+            continue
+        clean_line = re.sub(r'<[^>]+>', '', line)
+        if clean_line and (not clean_lines or clean_lines[-1] != clean_line):
+            clean_lines.append(clean_line)
+    return "\n".join(clean_lines)
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_text_from_youtube(url):
+    video_id = extract_youtube_id(url)
+    if not video_id:
+        raise ValueError("无效的 YouTube 链接，请检查网址格式。")
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+    }
+
+    # 策略 1：官方 Transcript API
+    try:
+        ytt_api = YouTubeTranscriptApi()
+        target_languages = ['zh-CN', 'zh-TW', 'zh', 'en', 'ja', 'ko']
+        transcript_list = ytt_api.fetch(video_id, languages=target_languages)
+        full_text = "\n".join([chunk.text for chunk in transcript_list])
+        if full_text.strip():
+            return full_text
+    except Exception:
+        pass
+
+    # 策略 2：Web Player HTML 源码 Dom Caption 解构
+    try:
+        yt_page_url = f"https://www.youtube.com/watch?v={video_id}"
+        html_res = requests.get(yt_page_url, headers=headers, timeout=8)
+        if html_res.status_code == 200:
+            html = html_res.text
+            match = re.search(r'"captionTracks":\s*(\[.*?\])', html)
+            if match:
+                tracks = json.loads(match.group(1))
+                target_track = tracks[0] if tracks else None
+                for t in tracks:
+                    lang_code = t.get("languageCode", "")
+                    if any(l in lang_code for l in ["zh", "zh-CN", "zh-TW", "en"]):
+                        target_track = t
+                        break
+                if target_track and "baseUrl" in target_track:
+                    xml_res = requests.get(target_track["baseUrl"], headers=headers, timeout=8)
+                    if xml_res.status_code == 200:
+                        soup = BeautifulSoup(xml_res.text, "html.parser")
+                        text_nodes = soup.find_all("text")
+                        lines = [re.sub(r'<[^>]+>', '', node.get_text()) for node in text_nodes]
+                        full_text = "\n".join([l.strip() for l in lines if l.strip()])
+                        if len(full_text) > 30:
+                            return full_text
+    except Exception:
+        pass
+
+    raise Exception("云端 IP 受限或视频未开放公共 CC 字幕，请结合下方手机 CORS 代理或保底方法使用。")
+
 # --------------------------------------------------
 # 4. 多功能输入层（支持网页、YouTube、文件）
 # --------------------------------------------------
@@ -100,7 +162,7 @@ if input_mode == "✍️ 粘贴纯文本或网址(URL)":
     user_input = st.text_area(
         "粘贴文本或网页网址（以 http/https 开头）：",
         height=180,
-        placeholder="粘贴任意文章纯文本或 YouTube 提取的字幕...\n提示：粘贴后直接点击下方按钮即可动态智能提炼与听书！",
+        placeholder="粘贴任意文章纯文本、网页链接或从 YouTube 复制的文本...\n提示：粘贴后点击下方按钮即可一键提炼与听书！",
     )
     if user_input.strip():
         text_candidate = user_input.strip()
@@ -128,91 +190,102 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
     if yt_url.strip():
         video_id = extract_youtube_id(yt_url.strip())
         
-        if video_id:
-            st.markdown("#### 📱 跨域解封代理抓取")
-            st.caption("提示：点击下方按钮将通过手机端 CORS 桥梁直接拉取字幕。")
-            
-            # 带有 CORS Proxy 的高级 JS 脚本
-            js_code = f"""
-            <div style="font-family: system-ui, -apple-system, sans-serif; padding: 12px; background: #1e293b; border-radius: 10px; color: #fff;">
-                <button id="fetchBtn" style="background: #2563eb; color: white; border: none; padding: 12px 18px; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; font-size: 15px;">
-                    ⚡ 启动手机 CORS 跨域代理抓取字幕
-                </button>
-                <div id="status" style="margin-top: 10px; font-size: 13px; color: #94a3b8; text-align: center;">点击上方按钮开始解析</div>
-                <textarea id="resultText" style="width: 100%; height: 120px; margin-top: 10px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-size: 13px; display: none;" readonly></textarea>
-            </div>
+        tab_cloud, tab_cors = st.tabs(["🌩️ 云端突围模式", "📱 手机 CORS 代理模式"])
+        
+        with tab_cloud:
+            if st.button("🚀 启动云端多路矩阵抓取", use_container_width=True):
+                with st.spinner("正在通过云端突围矩阵提取字幕..."):
+                    try:
+                        fetched = fetch_text_from_youtube(yt_url.strip())
+                        st.session_state["yt_fetched_text"] = fetched
+                        st.success(f"🎉 字幕提取成功！共获取到 {len(fetched)} 个字符。")
+                    except Exception as e:
+                        st.error(f"云端提取受限: {e}")
 
-            <script>
-            document.getElementById('fetchBtn').addEventListener('click', async () => {{
-                const status = document.getElementById('status');
-                const resultText = document.getElementById('resultText');
-                const videoId = "{video_id}";
-                
-                status.innerText = "⏳ 正在通过手机 CORS 跨域代理获取字幕...";
-                status.style.color = "#fbbf24";
+        with tab_cors:
+            st.caption("提示：利用手机本地 IP 配合 CORS 代理桥梁拉取，规避机房 IP 黑名单。")
+            if video_id:
+                js_code = f"""
+                <div style="font-family: system-ui, -apple-system, sans-serif; padding: 12px; background: #1e293b; border-radius: 10px; color: #fff;">
+                    <button id="fetchBtn" style="background: #2563eb; color: white; border: none; padding: 12px 18px; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; font-size: 15px;">
+                        ⚡ 启动手机 CORS 跨域代理抓取
+                    </button>
+                    <div id="status" style="margin-top: 10px; font-size: 13px; color: #94a3b8; text-align: center;">准备就绪</div>
+                    <textarea id="resultText" style="width: 100%; height: 110px; margin-top: 10px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-size: 13px; display: none;" readonly></textarea>
+                </div>
 
-                const targetApi = `https://yt.lemnoslife.com/noKey/captions?videoId=${{videoId}}`;
-                const proxies = [
-                    `https://api.allorigins.win/raw?url=${{encodeURIComponent(targetApi)}}`,
-                    `https://corsproxy.io/?${{encodeURIComponent(targetApi)}}`
-                ];
+                <script>
+                document.getElementById('fetchBtn').addEventListener('click', async () => {{
+                    const status = document.getElementById('status');
+                    const resultText = document.getElementById('resultText');
+                    const videoId = "{video_id}";
+                    
+                    status.innerText = "⏳ 正在连接 CORS 跨域代理中...";
+                    status.style.color = "#fbbf24";
 
-                let fetchedText = "";
+                    const targetApi = `https://yt.lemnoslife.com/noKey/captions?videoId=${{videoId}}`;
+                    const proxies = [
+                        `https://api.allorigins.win/raw?url=${{encodeURIComponent(targetApi)}}`,
+                        `https://corsproxy.io/?${{encodeURIComponent(targetApi)}}`
+                    ];
 
-                for (let proxyUrl of proxies) {{
-                    try {{
-                        let response = await fetch(proxyUrl);
-                        if (response.ok) {{
-                            let data = await response.json();
-                            let tracks = data.subtitles || [];
-                            if (tracks.length > 0) {{
-                                let trackUrl = tracks[0].baseUrl;
-                                let xmlProxy = `https://api.allorigins.win/raw?url=${{encodeURIComponent(trackUrl)}}`;
-                                let xmlRes = await fetch(xmlProxy);
-                                let xmlText = await xmlRes.text();
-                                
-                                let parser = new DOMParser();
-                                let xmlDoc = parser.parseFromString(xmlText, "text/xml");
-                                let textNodes = xmlDoc.getElementsByTagName("text");
-                                
-                                let lines = [];
-                                for (let i = 0; i < textNodes.length; i++) {{
-                                    let txt = textNodes[i].textContent.replace(/<[^>]+>/g, '').trim();
-                                    if (txt) lines.push(txt);
+                    let fetchedText = "";
+
+                    for (let proxyUrl of proxies) {{
+                        try {{
+                            let response = await fetch(proxyUrl);
+                            if (response.ok) {{
+                                let data = await response.json();
+                                let tracks = data.subtitles || [];
+                                if (tracks.length > 0) {{
+                                    let trackUrl = tracks[0].baseUrl;
+                                    let xmlProxy = `https://api.allorigins.win/raw?url=${{encodeURIComponent(trackUrl)}}`;
+                                    let xmlRes = await fetch(xmlProxy);
+                                    let xmlText = await xmlRes.text();
+                                    
+                                    let parser = new DOMParser();
+                                    let xmlDoc = parser.parseFromString(xmlText, "text/xml");
+                                    let textNodes = xmlDoc.getElementsByTagName("text");
+                                    
+                                    let lines = [];
+                                    for (let i = 0; i < textNodes.length; i++) {{
+                                        let txt = textNodes[i].textContent.replace(/<[^>]+>/g, '').trim();
+                                        if (txt) lines.push(txt);
+                                    }}
+                                    fetchedText = lines.join('\\n');
+                                    if (fetchedText.length > 30) break;
                                 }}
-                                fetchedText = lines.join('\\n');
-                                if (fetchedText.length > 30) break;
                             }}
+                        }} catch (e) {{
+                            console.log("尝试下一个代理...");
                         }}
-                    }} catch (e) {{
-                        console.log("代理尝试中...");
                     }}
-                }}
 
-                if (fetchedText.length > 30) {{
-                    status.innerText = "✅ 跨域抓取成功！请点击框内全选复制，切到【粘贴纯文本】即可使用：";
-                    status.style.color = "#4ade80";
-                    resultText.value = fetchedText;
-                    resultText.style.display = "block";
-                    resultText.select();
-                }} else {{
-                    status.innerText = "💡 若该视频未开放公共 API，请使用下方“1 秒手动复制”方法：";
-                    status.style.color = "#f87171";
-                }}
-            }});
-            </script>
-            """
-            st.components.v1.html(js_code, height=250)
+                    if (fetchedText.length > 30) {{
+                        status.innerText = "✅ 抓取成功！已自动选中下方文本，长按复制后切换到【粘贴纯文本】即可使用：";
+                        status.style.color = "#4ade80";
+                        resultText.value = fetchedText;
+                        resultText.style.display = "block";
+                        resultText.select();
+                    }} else {{
+                        status.innerText = "⚠️ 抓取未响应：该视频作者未开启公开 CC 字幕（例如老高部分视频）。";
+                        status.style.color = "#f87171";
+                    }}
+                }});
+                </script>
+                """
+                st.components.v1.html(js_code, height=230)
 
-            with st.expander("💡 100% 成功保底方案（手机 YouTube 客户端 1 秒复制法）"):
-                st.markdown("""
-                如果某些视频没有公共字幕 API，请用这个 **100% 永远有效** 的小技巧：
-                1. 打开 **YouTube App**，在视频下方点击 **“展开 / 更多”**。
-                2. 点击 **“显示字幕 (Show transcript)”**。
-                3. 长按全选字幕复制，点击上方 **【✍️ 粘贴纯文本或网址(URL)】** 模式粘贴进来即可！
-                """)
-        else:
-            st.error("无效的 YouTube 链接，请检查网址格式。")
+        if "yt_fetched_text" in st.session_state and st.session_state["yt_fetched_text"]:
+            raw_text = st.session_state["yt_fetched_text"]
+
+        with st.expander("💡 视频无公开 CC 字幕时的 100% 成功保底方案"):
+            st.markdown("""
+            **诊断说明**：若视频未开启字幕（YouTube App 描述栏没有“显示字幕”按钮）：
+            1. 打开 YouTube App / 网页版视频，展开说明栏。
+            2. 若有 **“显示字幕 (Show transcript)”**，长按全选复制。
+            3. 切换回顶部 **【✍️ 粘贴纯文本或网址(URL)】** 模式粘贴进来，即可完美使用！
+            """)
 
 else:
     uploaded_file = st.file_uploader(
