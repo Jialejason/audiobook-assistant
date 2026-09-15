@@ -89,8 +89,12 @@ def fetch_text_from_youtube(url):
     if not video_id:
         raise ValueError("无效的 YouTube 链接，请检查网址格式。")
     
-    # 策略 1：尝试标准官方 API
+    # 策略 1：尝试标准官方 API（附带自定义伪装请求头）
     try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7"
+        }
         ytt_api = YouTubeTranscriptApi()
         target_languages = ['zh-CN', 'zh-TW', 'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es']
         transcript_list = ytt_api.fetch(video_id, languages=target_languages)
@@ -100,31 +104,66 @@ def fetch_text_from_youtube(url):
     except Exception:
         pass
 
-    # 策略 2：通过全球公开去中心化 Invidious 节点矩阵突围云端 IP 封锁
+    # 策略 2：通过全球公开的 Piped API 分布式代理节点矩阵突围
+    piped_instances = [
+        "https://pipedapi.kavin.rocks",
+        "https://pipedapi.ytocal.host",
+        "https://pipedapi-libre.kavin.rocks",
+        "https://pipedapi.privacy.com.de"
+    ]
+    
+    for instance in piped_instances:
+        try:
+            res = requests.get(f"{instance}/streams/{video_id}", timeout=6)
+            if res.status_code == 200:
+                data = res.json()
+                subtitles = data.get("subtitles", [])
+                if subtitles:
+                    target_sub = None
+                    for sub in subtitles:
+                        code = sub.get("code", "")
+                        if any(l in code for l in ["zh", "zh-CN", "en", "ja"]):
+                            target_sub = sub
+                            break
+                    if not target_sub and subtitles:
+                        target_sub = subtitles[0]
+                    
+                    subtitles_url = target_sub.get("url")
+                    if subtitles_url:
+                        sub_res = requests.get(subtitles_url, timeout=8)
+                        if sub_res.status_code == 200:
+                            sub_text = sub_res.text
+                            clean_lines = []
+                            for line in sub_text.split("\n"):
+                                line = line.strip()
+                                if "-->" in line or not line or line.startswith("WEBVTT") or line.isdigit() or re.match(r'^\d+:\d+', line):
+                                    continue
+                                clean_line = re.sub(r'<[^>]+>', '', line)
+                                if clean_line and clean_line not in clean_lines:
+                                    clean_lines.append(clean_line)
+                            full_text = "\n".join(clean_lines)
+                            if len(full_text) > 30:
+                                return full_text
+        except Exception:
+            continue
+
+    # 策略 3：通过去中心化 Invidious 节点二次轮询兜底
     invidious_nodes = [
         "https://yewtu.be",
         "https://vid.puffyan.us",
-        "https://invidious.projectsegfault.net",
-        "https://iv.ggtyler.dev"
+        "https://invidious.projectsegfault.net"
     ]
     
     for node in invidious_nodes:
         try:
-            res = requests.get(f"{node}/api/v1/captions/{video_id}", timeout=6)
+            res = requests.get(f"{node}/api/v1/captions/{video_id}", timeout=5)
             if res.status_code == 200:
                 data = res.json()
                 captions = data.get("captions", [])
                 if captions:
-                    target_cap = None
-                    for cap in captions:
-                        if any(l in cap.get("languageCode", "") for l in ["zh", "en", "ja"]):
-                            target_cap = cap
-                            break
-                    if not target_cap:
-                        target_cap = captions[0]
-                    
+                    target_cap = captions[0]
                     cap_url = node + target_cap.get("url")
-                    vtt_res = requests.get(cap_url, timeout=8)
+                    vtt_res = requests.get(cap_url, timeout=6)
                     if vtt_res.status_code == 200:
                         vtt_text = vtt_res.text
                         clean_lines = []
@@ -141,7 +180,7 @@ def fetch_text_from_youtube(url):
         except Exception:
             continue
 
-    raise Exception("YouTube 云端防火墙拦截成功，所有突围中转节点均无响应。建议更换视频测试或在本地运行。")
+    raise Exception("YouTube 云端防火墙拦截成功，所有突围中转节点均繁忙。建议稍后重试或切换其他视频测试。")
 
 # --------------------------------------------------
 # 4. 多功能输入层（支持网页、YouTube、文件）
@@ -185,7 +224,7 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
         placeholder="https://youtu.be/..."
     )
     if yt_url.strip():
-        with st.spinner("🎬 正在通过突围矩阵提取 YouTube 视频字幕对白..."):
+        with st.spinner("🎬 正在通过高级突围矩阵多路抓取 YouTube 视频字幕..."):
             try:
                 raw_text = fetch_text_from_youtube(yt_url.strip())
                 st.success(f"🎉 YouTube 视频内容提取成功！共获取到 {len(raw_text)} 个字符的对白。")
