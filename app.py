@@ -30,7 +30,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手")
 st.caption(
-    "全领域动态自适应版：AI 智能分章节听书助理 + Trafilatura 网页解构 + CORS 跨域代理"
+    "全领域动态自适应版：智能分章节听书助理 + 增强型纯代码提炼引擎 + 动态字库"
 )
 
 # --------------------------------------------------
@@ -200,7 +200,6 @@ elif input_mode == "📚 智能分章节整本听书 (目录网址)":
             st.session_state.current_chapter_idx = 0
             st.rerun()
 
-    # 如果已经解析出了章节列表，展示互动助理控制面板
     if st.session_state.book_chapters:
         chapters = st.session_state.book_chapters
         idx = st.session_state.current_chapter_idx
@@ -209,12 +208,11 @@ elif input_mode == "📚 智能分章节整本听书 (目录网址)":
         st.markdown("---")
         st.markdown(f"📖 **当前导读进度**：第 **{idx + 1}** 章 / 共 **{total}** 章")
 
-        # 章节切换按钮组
         col_prev, col_info, col_next = st.columns([1, 2, 1])
         with col_prev:
             if st.button("◀️ 上一章", use_container_width=True, disabled=(idx <= 0)):
                 st.session_state.current_chapter_idx -= 1
-                st.session_state.full_audio_bytes = None  # 切换章节清空旧音频
+                st.session_state.full_audio_bytes = None
                 st.rerun()
         with col_info:
             st.markdown(f"<div style='text-align:center; font-weight:bold; color:#38bdf8; margin-top:5px;'>{chapters[idx]['title']}</div>", unsafe_allow_html=True)
@@ -224,7 +222,6 @@ elif input_mode == "📚 智能分章节整本听书 (目录网址)":
                 st.session_state.full_audio_bytes = None
                 st.rerun()
 
-        # 自动抓取当前章节正文
         current_ch_url = chapters[idx]['url']
         with st.spinner(f"正在加载【{chapters[idx]['title']}】正文内容..."):
             try:
@@ -296,9 +293,7 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
                                 if (fetchedText.length > 30) break;
                             }}
                         }}
-                    }} catch (e) {{
-                        console.log("代理尝试中...");
-                    }}
+                    }} catch (e) {{}}
                 }}
 
                 if (fetchedText.length > 30) {{
@@ -337,7 +332,6 @@ else:
 # 5. 全球多语种音色选择
 # --------------------------------------------------
 VOICE_MAP = {
-    # --- 中文与方言区 ---
     "zh-CN-XiaoxiaoNeural": "💃 Xiaoxiao - 经典御姐 / 知性温婉 (推荐)",
     "zh-CN-YunxiNeural": "🎙️ Yunxi - 磁性男主角 (小说听书推荐)",
     "zh-HK-HiuMaanNeural": "🇭🇰 HiuMaan - 标准粤语 / 港台风情",
@@ -349,22 +343,10 @@ VOICE_MAP = {
     "zh-CN-XiaozhenNeural": "📖 Xiaozhen - 故事绘本 / 亲切女声",
     "zh-CN-YunfengNeural": "🎬 Yunfeng - 影视解说 / 沉稳男声",
     "zh-CN-YunhaoNeural": "👦 Yunhao - 活力少男 / 朝气澎湃",
-    "zh-CN-LN-XiaobeiNeural": "🗣️ Xiaobei - 东北方言 / 豪爽风趣",
-    "zh-CN-SC-YunxiNeural": "🌶️ Yunxi - 四川方言 / 辣味亲切",
-    "zh-CN-SD-YunxiangNeural": "🌾 Yunxiang - 山东方言 / 朴实厚重",
-    "zh-HK-WanLungNeural": "🇭🇰 WanLung - 粤语男声 / 稳重成熟",
-    "zh-TW-YunJheNeural": "🍵 YunJhe - 台湾腔男声 / 自然流畅",
-    # --- 国际大语种区 ---
     "en-US-JennyNeural": "🇺🇸 Jenny (美音) - 自然清晰 / 播客首选",
     "en-US-GuyNeural": "🇺🇸 Guy (美音) - 商务稳重 / 男声解说",
-    "en-GB-SoniaNeural": "🇬🇧 Sonia (英音) - 优雅地道 / 英伦风情",
     "ja-JP-NanamiNeural": "🇯🇵 Nanami (日语) - 甜美自然 / 亲切女声",
-    "ja-JP-KeitaNeural": "🇯🇵 Keita (日语) - 沉稳男声 / 动漫解说感",
     "ko-KR-SunHiNeural": "🇰🇷 SunHi (韩语) - 温柔细腻 / 韩剧女声",
-    "ko-KR-InJoonNeural": "🇰🇷 InJoon (韩语) - 磁性男声 / 沉稳有力",
-    "fr-FR-DeniseNeural": "🇫🇷 Denise (法语) - 优雅浪漫 / 标准女声",
-    "de-DE-KatjaNeural": "🇩🇪 Katja (德语) - 严谨清晰 / 播音质感",
-    "es-ES-ElviraNeural": "🇪🇸 Elvira (西班牙语) - 热情明快",
 }
 voice_option = st.selectbox(
     "选择朗读音色：",
@@ -432,11 +414,7 @@ async def synth_single_chunk(chunk, voice):
             if item["type"] == "audio":
                 audio_data.extend(item["data"])
     except Exception:
-        fallback = (
-            "zh-CN-XiaoxiaoNeural"
-            if any(f in voice for f in ["Xiaorui", "Xiaoyi", "HsiaoChen", "Xiaoxiao", "HiuMaan"])
-            else "zh-CN-YunxiNeural"
-        )
+        fallback = "zh-CN-XiaoxiaoNeural"
         communicate = edge_tts.Communicate(chunk, fallback)
         async for item in communicate.stream():
             if item["type"] == "audio":
@@ -467,11 +445,10 @@ def run_async_safe(coroutine):
             loop.close()
 
 # --------------------------------------------------
-# 7. 跨平台自适应字库引擎（已升级：通过系统 fc-list 动态精准匹配中文）
+# 7. 跨平台自适应字库引擎
 # --------------------------------------------------
 @st.cache_resource
 def get_chinese_font(font_size=20):
-    # 1. 优先使用系统 fontconfig (fc-list) 动态寻找中文字体路径
     try:
         res = subprocess.run(['fc-list', ':lang=zh', 'file'], capture_output=True, text=True, timeout=3)
         if res.returncode == 0 and res.stdout:
@@ -485,7 +462,6 @@ def get_chinese_font(font_size=20):
     except Exception:
         pass
 
-    # 2. 常见 Linux 中文字体路径兜底
     linux_paths = [
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
@@ -499,7 +475,6 @@ def get_chinese_font(font_size=20):
             except Exception:
                 continue
 
-    # 3. 本地备用路径（Windows / Mac）
     fallback_paths = [
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttc",
@@ -619,7 +594,7 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     return img_byte_arr.getvalue()
 
 # --------------------------------------------------
-# 8. 全领域动态自适应提炼引擎【跨学科通用逻辑】
+# 8. 智能增强型本地提炼引擎（已升级：自动清洗小标题与噪声）
 # --------------------------------------------------
 def clean_sentence_prefix(sentence):
     cleaned = sentence.strip()
@@ -630,11 +605,19 @@ def clean_sentence_prefix(sentence):
         r"^在我看来[，,]?",
         r"^著名的科学家.*曾经说[，,]?",
         r"^我举一个简单的例子[：:]?",
-        r"^一提到.*首先想到的就是",
     ]
     for p in patterns:
         cleaned = re.sub(p, "", cleaned)
     return cleaned.strip()
+
+def is_noise_or_heading(sentence):
+    s = sentence.strip()
+    # 过滤掉章节小标题、结语、目录行
+    if re.match(r'^(?:[一二三四五六七八九十]+[、\.\s]|\d+[、\.\s]|结语|总结|引言|前言|摘要|本章|一、|二、|三、|四、)', s):
+        return True
+    if len(s) < 15 or len(s) > 100:
+        return True
+    return False
 
 def extract_with_ollama(text, model_name):
     url = "http://localhost:11434/api/generate"
@@ -699,6 +682,7 @@ def extract_ultimate_local_insights(text):
     headings = []
     candidates = []
     data_sentences = []
+    definition_sentences = [] # 专门搜寻定义句作为一句话精髓
     total_paras = len(paragraphs)
 
     for p_idx, p in enumerate(paragraphs):
@@ -709,12 +693,16 @@ def extract_ultimate_local_insights(text):
         sentences = re.split(r"[。！!？\?]", p)
         for s_idx, s in enumerate(sentences):
             s_clean = s.strip()
-            if len(s_clean) < 12:
+            if is_noise_or_heading(s_clean):
                 continue
 
             if re.search(r"\d+(\.\d+)?(%|亿|万|次方|年|层|个)?", s_clean) and len(s_clean) > 15:
                 if s_clean not in data_sentences and len(data_sentences) < 3:
                     data_sentences.append(clean_sentence_prefix(s_clean))
+
+            # 识别定义句或核心观点句
+            if any(w in s_clean for w in ["本质是", "意味着", "复利是", "核心在于", "视作", "规律", "杠杆"]):
+                definition_sentences.append(clean_sentence_prefix(s_clean))
 
             score = 0
             if s_idx == 0:
@@ -723,18 +711,15 @@ def extract_ultimate_local_insights(text):
             if any(kw in s_clean for kw in keywords[:5]):
                 score += 4
                 
-            if any(w in s_clean for w in ["底层", "核心", "关键", "本质", "原则", "总结", "规律", "逻辑", "机制", "结构", "核心是", "本质是"]):
+            if any(w in s_clean for w in ["底层", "核心", "关键", "本质", "原则", "规律", "逻辑"]):
                 score += 4
                 
-            if any(w in s_clean for w in ["等于", "意味着", "决定了", "在于", "归根结底", "换句话说", "核心在于", "关键在于", "则是"]):
+            if any(w in s_clean for w in ["等于", "意味着", "决定了", "在于", "归根结底", "则是"]):
                 score += 6
-                
-            if p_idx >= total_paras * 0.5 or "总结" in p or "核心观点" in p or "结论" in p:
-                score += 3
 
             if score >= 5:
                 clean_s = clean_sentence_prefix(s_clean)
-                if clean_s and len(clean_s) > 12:
+                if clean_s and not is_noise_or_heading(clean_s):
                     candidates.append((score, clean_s))
 
     candidates.sort(key=lambda x: x[0], reverse=True)
@@ -742,12 +727,20 @@ def extract_ultimate_local_insights(text):
     unique_candidates = []
     seen = set()
     for _, s in candidates:
-        if s not in seen:
+        if s not in seen and len(s) > 15:
             seen.add(s)
             unique_candidates.append(s)
 
-    top_one_sentence = unique_candidates[0] if unique_candidates else "把握文章的核心逻辑与主旨概念。"
-    top_points = unique_candidates[1:4] if len(unique_candidates) > 1 else unique_candidates[:1]
+    # 智能挑选一句话精髓：优先选择定义句，如果没有则取第一个高质量候选句
+    top_one_sentence = ""
+    if definition_sentences:
+        top_one_sentence = definition_sentences[0]
+    elif unique_candidates:
+        top_one_sentence = unique_candidates[0]
+    else:
+        top_one_sentence = "把握文章的核心逻辑与增长原则。"
+
+    top_points = unique_candidates[:3] if len(unique_candidates) >= 3 else unique_candidates
 
     summary_md = f"📈 **文本体检**：全文共 **{char_count}** 字  |  ⏱️ 预估阅读约 **{read_minutes}** 分钟\n\n"
     
@@ -756,7 +749,7 @@ def extract_ultimate_local_insights(text):
 
     if headings:
         summary_md += "🧩 **文章结构骨架**：\n"
-        for h in headings:
+        for h in headings[:5]:  # 只展示前5个有效骨架
             summary_md += f"• **{h}**\n"
         summary_md += "\n"
 
@@ -823,7 +816,7 @@ with col2:
                         st.session_state.top_quote = top_quote
                         st.session_state.current_keywords = kws
             else:
-                with st.spinner("⚡ 正在通过全领域动态引擎深度提炼中..."):
+                with st.spinner("⚡ 正在通过智能增强引擎深度提炼中..."):
                     summary_res, top_quote, kws = extract_ultimate_local_insights(raw_text)
                     st.session_state.local_summary = summary_res
                     st.session_state.top_quote = top_quote
