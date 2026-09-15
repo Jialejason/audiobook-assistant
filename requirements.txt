@@ -7,3 +7,5 @@ pypdf
 jieba
 youtube-transcript-api
 trafilatura
+lxml
+fonttools
