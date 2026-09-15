@@ -42,7 +42,7 @@ with st.sidebar:
     )
 
 # --------------------------------------------------
-# 3. 网页与 YouTube 抓取解析函数（含缓存优化）
+# 3. 网页与 YouTube 抓取解析函数（已修复最新 API 兼容性）
 # --------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_text_from_url(url):
@@ -90,9 +90,11 @@ def fetch_text_from_youtube(url):
         raise ValueError("无效的 YouTube 链接，请检查网址格式。")
     
     try:
+        # 修复：使用最新版 youtube-transcript-api 实例的 fetch 方法
+        ytt_api = YouTubeTranscriptApi()
         target_languages = ['zh-CN', 'zh-TW', 'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es']
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=target_languages)
-        full_text = "\n".join([item['text'] for item in transcript_list])
+        transcript_list = ytt_api.fetch(video_id, languages=target_languages)
+        full_text = "\n".join([chunk.text for chunk in transcript_list])
         return full_text
     except Exception as e:
         raise Exception(f"无法获取该视频的字幕（可能该视频未开启字幕或无公开字幕）: {e}")
@@ -201,7 +203,7 @@ voice_option = st.selectbox(
 )
 
 # --------------------------------------------------
-# 6. 纯净语音与安全切片引擎（含异步安全包装）
+# 6. 纯净语音与安全切片引擎
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -284,7 +286,6 @@ async def generate_audio_bytes_safe(text, voice):
     return bytes(full_audio)
 
 def run_async_safe(coroutine):
-    """安全运行异步任务，避免 Streamlit 线程事件冲突"""
     try:
         return asyncio.run(coroutine)
     except RuntimeError:
