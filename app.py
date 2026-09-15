@@ -23,7 +23,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手")
 st.caption(
-    "全领域动态自适应版：CORS 跨域突围矩阵 + 无字幕智能诊断 + 全球母语听书"
+    "全领域动态自适应版：智能突围 + 语音工具无缝连环接驳 + 全球母语听书"
 )
 
 # --------------------------------------------------
@@ -106,7 +106,6 @@ def fetch_text_from_youtube(url):
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
     }
 
-    # 策略 1：官方 Transcript API
     try:
         ytt_api = YouTubeTranscriptApi()
         target_languages = ['zh-CN', 'zh-TW', 'zh', 'en', 'ja', 'ko']
@@ -117,7 +116,6 @@ def fetch_text_from_youtube(url):
     except Exception:
         pass
 
-    # 策略 2：Web Player HTML 源码 Dom Caption 解构
     try:
         yt_page_url = f"https://www.youtube.com/watch?v={video_id}"
         html_res = requests.get(yt_page_url, headers=headers, timeout=8)
@@ -144,7 +142,7 @@ def fetch_text_from_youtube(url):
     except Exception:
         pass
 
-    raise Exception("云端 IP 受限或视频未开放公共 CC 字幕，请结合下方手机 CORS 代理或保底方法使用。")
+    raise Exception("云端 IP 受限或视频无公开字幕。请使用下方【连环工具链】或【快速接驳】。")
 
 # --------------------------------------------------
 # 4. 多功能输入层（支持网页、YouTube、文件）
@@ -162,7 +160,7 @@ if input_mode == "✍️ 粘贴纯文本或网址(URL)":
     user_input = st.text_area(
         "粘贴文本或网页网址（以 http/https 开头）：",
         height=180,
-        placeholder="粘贴任意文章纯文本、网页链接或从 YouTube 复制的文本...\n提示：粘贴后点击下方按钮即可一键提炼与听书！",
+        placeholder="粘贴任意文章纯文本、网页链接或字幕/语音转文字内容...\n提示：粘贴后点击下方按钮即可一键提炼与听书！",
     )
     if user_input.strip():
         text_candidate = user_input.strip()
@@ -190,28 +188,43 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
     if yt_url.strip():
         video_id = extract_youtube_id(yt_url.strip())
         
-        tab_cloud, tab_cors = st.tabs(["🌩️ 云端突围模式", "📱 手机 CORS 代理模式"])
+        # --- 连环效应：外部语音/字幕工具极速直连 ---
+        st.markdown("**🔗 极速转录工具链 (一键联动第三方解封)**")
+        col_link1, col_link2 = st.columns(2)
+        if video_id:
+            with col_link1:
+                st.link_button(
+                    "🌐 调起 YouTubeTranscript 提取", 
+                    f"https://youtubetranscript.com/?v={video_id}", 
+                    use_container_width=True
+                )
+            with col_link2:
+                st.link_button(
+                    "🛠️ 调起 DownSub 极速导出", 
+                    f"https://downsub.com/?url=https://www.youtube.com/watch?v={video_id}", 
+                    use_container_width=True
+                )
+
+        tab_auto, tab_paste = st.tabs(["⚡ 自动矩阵抓取", "📋 字幕/转录文本一键接驳"])
         
-        with tab_cloud:
+        with tab_auto:
             if st.button("🚀 启动云端多路矩阵抓取", use_container_width=True):
-                with st.spinner("正在通过云端突围矩阵提取字幕..."):
+                with st.spinner("正在通过云端矩阵提取字幕..."):
                     try:
                         fetched = fetch_text_from_youtube(yt_url.strip())
                         st.session_state["yt_fetched_text"] = fetched
                         st.success(f"🎉 字幕提取成功！共获取到 {len(fetched)} 个字符。")
                     except Exception as e:
-                        st.error(f"云端提取受限: {e}")
+                        st.error(f"{e}")
 
-        with tab_cors:
-            st.caption("提示：利用手机本地 IP 配合 CORS 代理桥梁拉取，规避机房 IP 黑名单。")
             if video_id:
                 js_code = f"""
-                <div style="font-family: system-ui, -apple-system, sans-serif; padding: 12px; background: #1e293b; border-radius: 10px; color: #fff;">
-                    <button id="fetchBtn" style="background: #2563eb; color: white; border: none; padding: 12px 18px; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; font-size: 15px;">
-                        ⚡ 启动手机 CORS 跨域代理抓取
+                <div style="font-family: system-ui, -apple-system, sans-serif; padding: 12px; background: #1e293b; border-radius: 10px; color: #fff; margin-top: 10px;">
+                    <button id="fetchBtn" style="background: #2563eb; color: white; border: none; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; font-size: 14px;">
+                        📱 启动手机 CORS 跨域代理抓取
                     </button>
-                    <div id="status" style="margin-top: 10px; font-size: 13px; color: #94a3b8; text-align: center;">准备就绪</div>
-                    <textarea id="resultText" style="width: 100%; height: 110px; margin-top: 10px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-size: 13px; display: none;" readonly></textarea>
+                    <div id="status" style="margin-top: 8px; font-size: 12px; color: #94a3b8; text-align: center;">备用代理方案</div>
+                    <textarea id="resultText" style="width: 100%; height: 90px; margin-top: 8px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 8px; font-size: 12px; display: none;" readonly></textarea>
                 </div>
 
                 <script>
@@ -220,7 +233,7 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
                     const resultText = document.getElementById('resultText');
                     const videoId = "{video_id}";
                     
-                    status.innerText = "⏳ 正在连接 CORS 跨域代理中...";
+                    status.innerText = "⏳ 连接跨域代理中...";
                     status.style.color = "#fbbf24";
 
                     const targetApi = `https://yt.lemnoslife.com/noKey/captions?videoId=${{videoId}}`;
@@ -256,36 +269,36 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
                                     if (fetchedText.length > 30) break;
                                 }}
                             }}
-                        }} catch (e) {{
-                            console.log("尝试下一个代理...");
-                        }}
+                        }} catch (e) {{}}
                     }}
 
                     if (fetchedText.length > 30) {{
-                        status.innerText = "✅ 抓取成功！已自动选中下方文本，长按复制后切换到【粘贴纯文本】即可使用：";
+                        status.innerText = "✅ 抓取成功！复制下方文本粘贴至右侧【一键接驳】面板：";
                         status.style.color = "#4ade80";
                         resultText.value = fetchedText;
                         resultText.style.display = "block";
                         resultText.select();
                     }} else {{
-                        status.innerText = "⚠️ 抓取未响应：该视频作者未开启公开 CC 字幕（例如老高部分视频）。";
+                        status.innerText = "⚠️ 视频无公开 CC 字幕，请使用上方快捷按钮调起工具链导出。";
                         status.style.color = "#f87171";
                     }}
                 }});
                 </script>
                 """
-                st.components.v1.html(js_code, height=230)
+                st.components.v1.html(js_code, height=190)
+
+        with tab_paste:
+            yt_manual_text = st.text_area(
+                "在此粘贴导出的字幕或语音转文字内容：",
+                height=150,
+                placeholder="从上方工具链或 YouTube App 复制文本后直接粘贴在这里，系统将无缝接驳并生成听书与分析！"
+            )
+            if yt_manual_text.strip():
+                st.session_state["yt_fetched_text"] = yt_manual_text.strip()
+                st.success(f"🎉 成功接驳文本！共 {len(yt_manual_text.strip())} 个字符。即刻点击下方按钮开始提炼或合成听书。")
 
         if "yt_fetched_text" in st.session_state and st.session_state["yt_fetched_text"]:
             raw_text = st.session_state["yt_fetched_text"]
-
-        with st.expander("💡 视频无公开 CC 字幕时的 100% 成功保底方案"):
-            st.markdown("""
-            **诊断说明**：若视频未开启字幕（YouTube App 描述栏没有“显示字幕”按钮）：
-            1. 打开 YouTube App / 网页版视频，展开说明栏。
-            2. 若有 **“显示字幕 (Show transcript)”**，长按全选复制。
-            3. 切换回顶部 **【✍️ 粘贴纯文本或网址(URL)】** 模式粘贴进来，即可完美使用！
-            """)
 
 else:
     uploaded_file = st.file_uploader(
