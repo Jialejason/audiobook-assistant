@@ -6,3 +6,4 @@ Pillow
 pypdf
 jieba
 youtube-transcript-api
+trafilatura
