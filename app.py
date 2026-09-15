@@ -466,25 +466,34 @@ def run_async_safe(coroutine):
             loop.close()
 
 # --------------------------------------------------
-# 7. 跨平台自适应字库引擎
+# 7. 跨平台自适应字库引擎（已升级：全自动递归扫描云端字库）
 # --------------------------------------------------
 def get_chinese_font(font_size=20):
-    font_paths = [
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    # 自动递归扫描 Linux 云端系统的整个字体目录，寻找任何可用的字体文件
+    if os.path.exists("/usr/share/fonts"):
+        for root, dirs, files in os.walk("/usr/share/fonts"):
+            for file in files:
+                if file.endswith((".ttf", ".ttc", ".otf")):
+                    full_path = os.path.join(root, file)
+                    try:
+                        return ImageFont.truetype(full_path, font_size)
+                    except Exception:
+                        continue
+
+    # 本地备用路径（Windows / Mac）
+    fallback_paths = [
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttc",
         "C:/Windows/Fonts/simsun.ttc",
         "/System/Library/Fonts/PingFang.ttc"
     ]
-    for path in font_paths:
+    for path in fallback_paths:
         if os.path.exists(path):
             try:
                 return ImageFont.truetype(path, font_size)
             except Exception:
                 continue
+                
     return ImageFont.load_default()
 
 def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
