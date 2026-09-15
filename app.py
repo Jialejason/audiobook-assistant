@@ -2,6 +2,7 @@ import asyncio
 import io
 import os
 import re
+from urllib.parse import urljoin, urlparse
 import jieba
 import jieba.analyse
 import jieba.posseg as pseg
@@ -28,7 +29,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手")
 st.caption(
-    "全领域动态自适应版：Trafilatura 网页解构 + CORS 跨域代理 + 跨学科金句引擎"
+    "全领域动态自适应版：AI 智能分章节听书助理 + Trafilatura 网页解构 + CORS 跨域代理"
 )
 
 # --------------------------------------------------
@@ -48,22 +49,20 @@ with st.sidebar:
     )
 
 # --------------------------------------------------
-# 3. 高级网页正文与 YouTube 链接解析函数
+# 3. 高级网页与目录解析函数
 # --------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_text_from_url(url):
-    # 优先方案：使用 trafilatura 抽取纯净正文（自动过滤广告与菜单）
     if HAS_TRAFILATURA:
         try:
             downloaded = trafilatura.fetch_url(url)
             if downloaded:
                 result = trafilatura.extract(downloaded, include_comments=False, include_tables=True)
-                if result and len(result.strip()) > 50:
+                if result and len(result.strip()) > 30:
                     return result.strip()
         except Exception:
             pass
 
-    # 备用方案：BeautifulSoup 原生解析
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -90,6 +89,32 @@ def fetch_text_from_url(url):
     except Exception as e:
         raise Exception(f"网页抓取失败: {e}")
 
+def parse_book_catalog(catalog_url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    try:
+        res = requests.get(catalog_url, headers=headers, timeout=12)
+        res.encoding = res.apparent_encoding
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        parsed_url = urlparse(catalog_url)
+        base_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        
+        chapters = []
+        for a in soup.find_all("a", href=True):
+            text = a.get_text().strip()
+            href = a['href']
+            if text and (("第" in text and "章" in text) or len(text) < 30):
+                if any(kw in text for kw in ["首页", "书架", "登录", "目录", "作者", "意见", "关于", "上一页", "下一页", "尾页", "排行榜"]):
+                    continue
+                full_url = urljoin(base_domain, href) if not href.startswith("http") else href
+                if not any(c['url'] == full_url for c in chapters):
+                    chapters.append({"title": text, "url": full_url})
+        return chapters
+    except Exception as e:
+        raise Exception(f"解析书本目录失败: {e}")
+
 def extract_youtube_id(url):
     patterns = [
         r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
@@ -102,22 +127,22 @@ def extract_youtube_id(url):
     return None
 
 # --------------------------------------------------
-# 4. 多功能输入层（支持网页、YouTube、文件）
+# 4. 多功能输入层（支持单页网址、YouTube、文件、整本小说目录）
 # --------------------------------------------------
 st.subheader("📥 导入阅读内容")
 input_mode = st.radio(
     "选择输入方式：",
-    ["✍️ 粘贴纯文本或网址(URL)", "🌐 粘贴 YouTube 视频链接", "📁 上传文件 (.txt / .pdf)"],
+    ["✍️ 粘贴纯文本或单页网址(URL)", "📚 智能分章节整本听书 (目录网址)", "🌐 粘贴 YouTube 视频链接", "📁 上传文件 (.txt / .pdf)"],
     horizontal=True,
 )
 
 raw_text = ""
 
-if input_mode == "✍️ 粘贴纯文本或网址(URL)":
+if input_mode == "✍️ 粘贴纯文本或单页网址(URL)":
     user_input = st.text_area(
         "粘贴文本或网页网址（以 http/https 开头）：",
-        height=180,
-        placeholder="粘贴任意文章纯文本、网页链接或复制的字幕...\n提示：粘贴后点击下方按钮即可一键提炼与听书！",
+        height=160,
+        placeholder="粘贴文章纯文本、单篇知乎/新闻链接或字幕...\n提示：单次建议控制在 2000-15000 字以内，体验最流畅！",
     )
     if user_input.strip():
         text_candidate = user_input.strip()
@@ -136,6 +161,77 @@ if input_mode == "✍️ 粘贴纯文本或网址(URL)":
                     raw_text = user_input
         else:
             raw_text = user_input
+
+elif input_mode == "📚 智能分章节整本听书 (目录网址)":
+    st.caption("🤖 AI 听书助理模式：输入整本书或小说的目录页网址，自动切章节并支持连续播放下一章！")
+    
+    if "book_chapters" not in st.session_state:
+        st.session_state.book_chapters = []
+    if "current_chapter_idx" not in st.session_state:
+        st.session_state.current_chapter_idx = 0
+
+    catalog_url = st.text_input(
+        "请输入书籍目录页网址：",
+        placeholder="https://www.example.com/book/12345/"
+    )
+    
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("📚 解析全书目录", use_container_width=True):
+            if catalog_url.strip():
+                with st.spinner("正在解析全书章节目录，请稍候..."):
+                    try:
+                        chapters = parse_book_catalog(catalog_url.strip())
+                        if chapters:
+                            st.session_state.book_chapters = chapters
+                            st.session_state.current_chapter_idx = 0
+                            st.success(f"🎉 目录解析成功！共发现 {len(chapters)} 个章节。")
+                        else:
+                            st.warning("未能在该网址中自动提取到章节目录，请尝试换一个源或直接使用单页网址。")
+                    except Exception as e:
+                        st.error(f"{e}")
+            else:
+                st.warning("请输入有效的目录网址！")
+
+    with col_btn2:
+        if st.button("🗑️ 清空目录重置", use_container_width=True):
+            st.session_state.book_chapters = []
+            st.session_state.current_chapter_idx = 0
+            st.rerun()
+
+    # 如果已经解析出了章节列表，展示互动助理控制面板
+    if st.session_state.book_chapters:
+        chapters = st.session_state.book_chapters
+        idx = st.session_state.current_chapter_idx
+        total = len(chapters)
+
+        st.markdown("---")
+        st.markdown(f"📖 **当前导读进度**：第 **{idx + 1}** 章 / 共 **{total}** 章")
+
+        # 章节切换按钮组
+        col_prev, col_info, col_next = st.columns([1, 2, 1])
+        with col_prev:
+            if st.button("◀️ 上一章", use_container_width=True, disabled=(idx <= 0)):
+                st.session_state.current_chapter_idx -= 1
+                st.session_state.full_audio_bytes = None  # 切换章节清空旧音频
+                st.rerun()
+        with col_info:
+            st.markdown(f"<div style='text-align:center; font-weight:bold; color:#38bdf8; margin-top:5px;'>{chapters[idx]['title']}</div>", unsafe_allow_html=True)
+        with col_next:
+            if st.button("▶️ 下一章", use_container_width=True, disabled=(idx >= total - 1)):
+                st.session_state.current_chapter_idx += 1
+                st.session_state.full_audio_bytes = None
+                st.rerun()
+
+        # 自动抓取当前章节正文
+        current_ch_url = chapters[idx]['url']
+        with st.spinner(f"正在加载【{chapters[idx]['title']}】正文内容..."):
+            try:
+                raw_text = fetch_text_from_url(current_ch_url)
+                st.info(f"✅ 本章加载成功，共 {len(raw_text)} 个字符。点击下方按钮即可一键听书或提炼！")
+            except Exception as e:
+                raw_text = f"加载章节正文出错: {e}"
+                st.error(raw_text)
 
 elif input_mode == "🌐 粘贴 YouTube 视频链接":
     yt_url = st.text_input(
@@ -667,7 +763,7 @@ col1, col2 = st.columns(2)
 with col1:
     if st.button("🚀 生成完整音频", type="primary", use_container_width=True):
         if not raw_text.strip():
-            st.warning("请先粘贴文本或导入内容！")
+            st.warning("请先加载章节或粘贴文本！")
         else:
             with st.spinner("正在合成完整音频（长文本请稍候）..."):
                 try:
@@ -682,7 +778,7 @@ with col1:
 with col2:
     if st.button("⚡ 开始知识深度提炼", use_container_width=True):
         if not raw_text.strip():
-            st.warning("请先粘贴文本或导入内容！")
+            st.warning("请先加载章节或粘贴文本！")
         else:
             if use_ollama:
                 with st.spinner("🧠 正在调用本地 Ollama (Qwen) AI 大模型思考中..."):
@@ -716,7 +812,7 @@ if st.session_state.full_audio_bytes:
     st.download_button(
         "📥 下载完整听书 MP3",
         data=st.session_state.full_audio_bytes,
-        file_name="full_audiobook.mp3",
+        file_name="audiobook_chapter.mp3",
         mime="audio/mp3",
         use_container_width=True,
     )
