@@ -26,7 +26,7 @@ st.caption(
 )
 
 # --------------------------------------------------
-# 2. 侧边栏：未来 Ollama (Qwen) 大模型选配设置
+# 2. 侧边栏：Ollama (Qwen) 大模型选配设置
 # --------------------------------------------------
 with st.sidebar:
     st.header("⚙️ 引擎设置")
@@ -42,8 +42,9 @@ with st.sidebar:
     )
 
 # --------------------------------------------------
-# 3. 网页与 YouTube 抓取解析函数
+# 3. 网页与 YouTube 抓取解析函数（含缓存优化）
 # --------------------------------------------------
+@st.cache_data(show_spinner=False, ttl=3600)
 def fetch_text_from_url(url):
     headers = {
         "User-Agent": (
@@ -52,21 +53,24 @@ def fetch_text_from_url(url):
         ),
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     }
-    response = requests.get(url, headers=headers, timeout=12)
-    response.encoding = response.apparent_encoding
-    soup = BeautifulSoup(response.text, "html.parser")
+    try:
+        response = requests.get(url, headers=headers, timeout=12)
+        response.encoding = response.apparent_encoding
+        soup = BeautifulSoup(response.text, "html.parser")
 
-    for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
-        element.extract()
+        for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
+            element.extract()
 
-    paragraphs = soup.find_all(["p", "article", "h1", "h2", "h3", "section"])
-    extracted_text = "\n".join([p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 10])
-    
-    if len(extracted_text) < 50:
-        extracted_text = soup.get_text().strip()
+        paragraphs = soup.find_all(["p", "article", "h1", "h2", "h3", "section"])
+        extracted_text = "\n".join([p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 10])
+        
+        if len(extracted_text) < 50:
+            extracted_text = soup.get_text().strip()
 
-    extracted_text = re.sub(r"\n\s*\n", "\n", extracted_text)
-    return extracted_text
+        extracted_text = re.sub(r"\n\s*\n", "\n", extracted_text)
+        return extracted_text
+    except Exception as e:
+        raise Exception(f"网页抓取失败: {e}")
 
 def extract_youtube_id(url):
     patterns = [
@@ -79,13 +83,13 @@ def extract_youtube_id(url):
             return match.group(1)
     return None
 
+@st.cache_data(show_spinner=False, ttl=3600)
 def fetch_text_from_youtube(url):
     video_id = extract_youtube_id(url)
     if not video_id:
         raise ValueError("无效的 YouTube 链接，请检查网址格式。")
     
     try:
-        # 支持中、英、日、韩、法、德等多语种字幕自动匹配
         target_languages = ['zh-CN', 'zh-TW', 'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es']
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=target_languages)
         full_text = "\n".join([item['text'] for item in transcript_list])
@@ -197,7 +201,7 @@ voice_option = st.selectbox(
 )
 
 # --------------------------------------------------
-# 6. 纯净语音与安全切片引擎
+# 6. 纯净语音与安全切片引擎（含异步安全包装）
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -278,6 +282,18 @@ async def generate_audio_bytes_safe(text, voice):
         await asyncio.sleep(0.05)
 
     return bytes(full_audio)
+
+def run_async_safe(coroutine):
+    """安全运行异步任务，避免 Streamlit 线程事件冲突"""
+    try:
+        return asyncio.run(coroutine)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coroutine)
+        finally:
+            loop.close()
 
 # --------------------------------------------------
 # 7. 跨平台自适应字库引擎
@@ -443,22 +459,26 @@ def extract_with_ollama(text, model_name):
     """
     payload = {"model": model_name, "prompt": prompt, "stream": False}
 
-    response = requests.post(url, json=payload, timeout=60)
-    if response.status_code == 200:
-        res_json = response.json()
-        ai_output = res_json.get("response", "")
+    try:
+        response = requests.post(url, json=payload, timeout=60)
+        if response.status_code == 200:
+            res_json = response.json()
+            ai_output = res_json.get("response", "")
 
-        top_quote = ""
-        quote_match = re.search(r"📌 \*\*一句话精髓\*\*：?\n?>?\s*(.*)", ai_output)
-        if quote_match:
-            top_quote = quote_match.group(1).split("\n")[0].strip()
+            top_quote = ""
+            quote_match = re.search(r"📌 \*\*一句话精髓\*\*：?\n?>?\s*(.*)", ai_output)
+            if quote_match:
+                top_quote = quote_match.group(1).split("\n")[0].strip()
+            else:
+                top_quote = "把握事物的底层逻辑与增长原则。"
+
+            return ai_output, top_quote, ["知识提炼", "核心要领"]
         else:
-            top_quote = "把握事物的底层逻辑与增长原则。"
+            raise Exception(f"Ollama 返回错误代码: {response.status_code}")
+    except Exception as e:
+        raise Exception(f"Ollama 连接异常: {e}")
 
-        return ai_output, top_quote, ["知识提炼", "核心要领"]
-    else:
-        raise Exception(f"Ollama 返回错误代码: {response.status_code}")
-
+@st.cache_data(show_spinner=False)
 def extract_ultimate_local_insights(text):
     if not text.strip():
         return "", "", []
@@ -577,7 +597,7 @@ with col1:
         else:
             with st.spinner("正在合成完整音频（长文本请稍候）..."):
                 try:
-                    audio_bytes = asyncio.run(
+                    audio_bytes = run_async_safe(
                         generate_audio_bytes_safe(raw_text, voice_option)
                     )
                     st.session_state.full_audio_bytes = audio_bytes
@@ -663,7 +683,7 @@ if st.session_state.local_summary:
         if st.button("🎙️ 将总结转为速读音频", use_container_width=True):
             with st.spinner("正在生成总结音频..."):
                 try:
-                    summary_bytes = asyncio.run(
+                    summary_bytes = run_async_safe(
                         generate_audio_bytes_safe(st.session_state.local_summary, voice_option)
                     )
                     st.session_state.summary_audio_bytes = summary_bytes
