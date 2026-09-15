@@ -23,7 +23,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手")
 st.caption(
-    "全领域动态自适应版：YouTube 动态突围矩阵 + 跨学科金句引擎 + 全球母语听书"
+    "全领域动态自适应版：YouTube 双引擎突围矩阵 + 跨学科金句引擎 + 全球母语听书"
 )
 
 # --------------------------------------------------
@@ -43,14 +43,14 @@ with st.sidebar:
     )
 
 # --------------------------------------------------
-# 3. 网页与 YouTube 终极突围抓取解析函数
+# 3. 网页与 YouTube 抓取解析函数
 # --------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_text_from_url(url):
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         ),
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     }
@@ -84,6 +84,17 @@ def extract_youtube_id(url):
             return match.group(1)
     return None
 
+def clean_subtitles_text(raw_vtt):
+    clean_lines = []
+    for line in raw_vtt.split("\n"):
+        line = line.strip()
+        if "-->" in line or not line or line.startswith("WEBVTT") or line.isdigit() or re.match(r'^\d+:\d+', line):
+            continue
+        clean_line = re.sub(r'<[^>]+>', '', line)
+        if clean_line and (not clean_lines or clean_lines[-1] != clean_line):
+            clean_lines.append(clean_line)
+    return "\n".join(clean_lines)
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_text_from_youtube(url):
     video_id = extract_youtube_id(url)
@@ -95,60 +106,7 @@ def fetch_text_from_youtube(url):
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
     }
 
-    # ---------------------------------------------------------
-    # 突围策略 1：动态获取全球健康度最高的 Invidious 实时节点
-    # ---------------------------------------------------------
-    try:
-        instances_res = requests.get("https://api.invidious.io/instances.json?sort_by=health", timeout=5)
-        if instances_res.status_code == 200:
-            instances_data = instances_res.json()
-            active_nodes = []
-            for node_info in instances_data:
-                domain, details = node_info[0], node_info[1]
-                if details.get("type") == "https" and details.get("api") and details.get("health", 0) > 80:
-                    active_nodes.append(f"https://{domain}")
-                    if len(active_nodes) >= 6:
-                        break
-            
-            for node in active_nodes:
-                try:
-                    res = requests.get(f"{node}/api/v1/captions/{video_id}", timeout=5, headers=headers)
-                    if res.status_code == 200:
-                        data = res.json()
-                        captions = data.get("captions", [])
-                        if captions:
-                            target_cap = None
-                            for cap in captions:
-                                code = cap.get("languageCode", "")
-                                if any(l in code for l in ["zh", "en", "ja"]):
-                                    target_cap = cap
-                                    break
-                            if not target_cap:
-                                target_cap = captions[0]
-                            
-                            cap_url = node + target_cap.get("url")
-                            vtt_res = requests.get(cap_url, timeout=6, headers=headers)
-                            if vtt_res.status_code == 200:
-                                vtt_text = vtt_res.text
-                                clean_lines = []
-                                for line in vtt_text.split("\n"):
-                                    line = line.strip()
-                                    if "-->" in line or not line or line.startswith("WEBVTT") or line.isdigit() or re.match(r'^\d+:\d+', line):
-                                        continue
-                                    clean_line = re.sub(r'<[^>]+>', '', line)
-                                    if clean_line and clean_line not in clean_lines:
-                                        clean_lines.append(clean_line)
-                                full_text = "\n".join(clean_lines)
-                                if len(full_text) > 30:
-                                    return full_text
-                except Exception:
-                    continue
-    except Exception:
-        pass
-
-    # ---------------------------------------------------------
-    # 突围策略 2：直接解析 YouTube 网页 Player XML/JSON Caption Tracks
-    # ---------------------------------------------------------
+    # 策略 1：Web Player 原生 HTML 源码 DOM 解构字幕轨迹
     try:
         yt_page_url = f"https://www.youtube.com/watch?v={video_id}"
         html_res = requests.get(yt_page_url, headers=headers, timeout=8)
@@ -160,7 +118,7 @@ def fetch_text_from_youtube(url):
                 target_track = None
                 for t in tracks:
                     lang_code = t.get("languageCode", "")
-                    if any(l in lang_code for l in ["zh", "en", "ja"]):
+                    if any(l in lang_code for l in ["zh", "zh-CN", "zh-TW", "en"]):
                         target_track = t
                         break
                 if not target_track and tracks:
@@ -170,8 +128,11 @@ def fetch_text_from_youtube(url):
                     xml_url = target_track["baseUrl"]
                     xml_res = requests.get(xml_url, headers=headers, timeout=8)
                     if xml_res.status_code == 200:
-                        soup = BeautifulSoup(xml_res.text, "html.parser")
+                        soup = BeautifulSoup(xml_res.text, "xml")
                         text_nodes = soup.find_all("text")
+                        if not text_nodes:
+                            soup = BeautifulSoup(xml_res.text, "html.parser")
+                            text_nodes = soup.find_all("text")
                         lines = [re.sub(r'<[^>]+>', '', node.get_text()) for node in text_nodes]
                         full_text = "\n".join([l.strip() for l in lines if l.strip()])
                         if len(full_text) > 30:
@@ -179,9 +140,7 @@ def fetch_text_from_youtube(url):
     except Exception:
         pass
 
-    # ---------------------------------------------------------
-    # 突围策略 3：原生 API 兜底
-    # ---------------------------------------------------------
+    # 策略 2：官方 API 模块抓取
     try:
         ytt_api = YouTubeTranscriptApi()
         target_languages = ['zh-CN', 'zh-TW', 'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es']
@@ -192,7 +151,36 @@ def fetch_text_from_youtube(url):
     except Exception:
         pass
 
-    raise Exception("YouTube 云端防火墙拦截极强，动态节点与网页解析均被限制。建议确认视频公开字幕或稍后重试。")
+    # 策略 3：通过 Piped API 分布式中转节点突围
+    piped_nodes = [
+        "https://pipedapi.kavin.rocks",
+        "https://pipedapi.ytocal.host",
+        "https://pipedapi.privacy.com.de"
+    ]
+    for node in piped_nodes:
+        try:
+            res = requests.get(f"{node}/streams/{video_id}", timeout=6, headers=headers)
+            if res.status_code == 200:
+                data = res.json()
+                subtitles = data.get("subtitles", [])
+                if subtitles:
+                    target_sub = subtitles[0]
+                    for sub in subtitles:
+                        code = sub.get("code", "")
+                        if any(l in code for l in ["zh", "en", "ja"]):
+                            target_sub = sub
+                            break
+                    sub_url = target_sub.get("url")
+                    if sub_url:
+                        sub_res = requests.get(sub_url, timeout=6, headers=headers)
+                        if sub_res.status_code == 200:
+                            cleaned = clean_subtitles_text(sub_res.text)
+                            if len(cleaned) > 30:
+                                return cleaned
+        except Exception:
+            continue
+
+    raise Exception("云端 IP 被限制。请使用下方【手机前端网络直连】按钮抓取。")
 
 # --------------------------------------------------
 # 4. 多功能输入层（支持网页、YouTube、文件）
@@ -236,12 +224,90 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
         placeholder="https://youtu.be/..."
     )
     if yt_url.strip():
-        with st.spinner("🎬 正在通过动态矩阵提取 YouTube 视频字幕..."):
-            try:
-                raw_text = fetch_text_from_youtube(yt_url.strip())
-                st.success(f"🎉 YouTube 视频内容提取成功！共获取到 {len(raw_text)} 个字符的对白。")
-            except Exception as e:
-                st.error(f"提取失败: {e}")
+        video_id = extract_youtube_id(yt_url.strip())
+        
+        # 模式 A: 云端多重 Python 矩阵抓取
+        if st.button("🎬 尝试云端提取字幕", use_container_width=True):
+            with st.spinner("正在通过云端突围矩阵提取 YouTube 视频字幕..."):
+                try:
+                    fetched = fetch_text_from_youtube(yt_url.strip())
+                    st.session_state["yt_fetched_text"] = fetched
+                    st.success(f"🎉 YouTube 视频内容提取成功！共获取到 {len(fetched)} 个字符的对白。")
+                except Exception as e:
+                    st.error(f"云端提取受限: {e}")
+
+        if "yt_fetched_text" in st.session_state and st.session_state["yt_fetched_text"]:
+            raw_text = st.session_state["yt_fetched_text"]
+
+        st.markdown("---")
+        st.markdown("#### 📱 手机前端网络直连突围 (彻底规避云端 IP 黑名单)")
+        st.caption("提示：点击下方按钮将直接调用你手机的本地网络发起 Fetch 请求，100% 避开数据中心 IP 拦截！")
+        
+        if video_id:
+            js_code = f"""
+            <div style="font-family: system-ui, -apple-system, sans-serif; padding: 12px; background: #1e293b; border-radius: 10px; color: #fff;">
+                <button id="fetchBtn" style="background: #2563eb; color: white; border: none; padding: 12px 18px; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; font-size: 15px;">
+                    ⚡ 启动手机本地网络抓取字幕
+                </button>
+                <div id="status" style="margin-top: 10px; font-size: 13px; color: #94a3b8; text-align: center;">点击上方按钮发起直连抓取</div>
+                <textarea id="resultText" style="width: 100%; height: 120px; margin-top: 10px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-size: 13px; display: none;" readonly></textarea>
+            </div>
+
+            <script>
+            document.getElementById('fetchBtn').addEventListener('click', async () => {{
+                const status = document.getElementById('status');
+                const resultText = document.getElementById('resultText');
+                const videoId = "{video_id}";
+                
+                status.innerText = "⏳ 正在通过手机本地 IP 请求 API 节点...";
+                status.style.color = "#fbbf24";
+
+                const nodes = [
+                    `https://pipedapi.kavin.rocks/streams/${{videoId}}`,
+                    `https://pipedapi.ytocal.host/streams/${{videoId}}`,
+                    `https://pipedapi.privacy.com.de/streams/${{videoId}}`
+                ];
+
+                let fetchedText = "";
+
+                for (let url of nodes) {{
+                    try {{
+                        let response = await fetch(url);
+                        if (response.ok) {{
+                            let data = await response.json();
+                            if (data.subtitles && data.subtitles.length > 0) {{
+                                let subUrl = data.subtitles[0].url;
+                                let subRes = await fetch(subUrl);
+                                let subText = await subRes.text();
+                                
+                                let lines = subText.split('\\n')
+                                    .map(l => l.trim())
+                                    .filter(l => l && !l.includes('-->') && !l.startsWith('WEBVTT') && !/^\\d+$/.test(l))
+                                    .map(l => l.replace(/<[^>]+>/g, ''));
+                                
+                                fetchedText = Array.from(new Set(lines)).join('\\n');
+                                if (fetchedText.length > 30) break;
+                            }}
+                        }}
+                    }} catch (e) {{
+                        console.log("节点切换中...");
+                    }}
+                }}
+
+                if (fetchedText.length > 30) {{
+                    status.innerText = "✅ 手机本地抓取成功！请全选并复制下方文本，切换到【粘贴纯文本】模式即可使用：";
+                    status.style.color = "#4ade80";
+                    resultText.value = fetchedText;
+                    resultText.style.display = "block";
+                    resultText.select();
+                }} else {{
+                    status.innerText = "❌ 抓取失败：该视频可能无公开字幕，或节点均繁忙。";
+                    status.style.color = "#f87171";
+                }}
+            }});
+            </script>
+            """
+            st.components.v1.html(js_code, height=250)
 
 else:
     uploaded_file = st.file_uploader(
@@ -574,7 +640,7 @@ def extract_with_ollama(text, model_name):
     except Exception as e:
         raise Exception(f"Ollama 连接异常: {e}")
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600)
 def extract_ultimate_local_insights(text):
     if not text.strip():
         return "", "", []
