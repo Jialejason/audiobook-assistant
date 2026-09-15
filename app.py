@@ -2,6 +2,7 @@ import asyncio
 import io
 import os
 import re
+import subprocess
 from urllib.parse import urljoin, urlparse
 import jieba
 import jieba.analyse
@@ -466,21 +467,39 @@ def run_async_safe(coroutine):
             loop.close()
 
 # --------------------------------------------------
-# 7. 跨平台自适应字库引擎（已升级：全自动递归扫描云端字库）
+# 7. 跨平台自适应字库引擎（已升级：通过系统 fc-list 动态精准匹配中文）
 # --------------------------------------------------
+@st.cache_resource
 def get_chinese_font(font_size=20):
-    # 自动递归扫描 Linux 云端系统的整个字体目录，寻找任何可用的字体文件
-    if os.path.exists("/usr/share/fonts"):
-        for root, dirs, files in os.walk("/usr/share/fonts"):
-            for file in files:
-                if file.endswith((".ttf", ".ttc", ".otf")):
-                    full_path = os.path.join(root, file)
+    # 1. 优先使用系统 fontconfig (fc-list) 动态寻找中文字体路径
+    try:
+        res = subprocess.run(['fc-list', ':lang=zh', 'file'], capture_output=True, text=True, timeout=3)
+        if res.returncode == 0 and res.stdout:
+            for line in res.stdout.splitlines():
+                font_path = line.split(':')[0].strip()
+                if font_path and os.path.exists(font_path):
                     try:
-                        return ImageFont.truetype(full_path, font_size)
+                        return ImageFont.truetype(font_path, font_size)
                     except Exception:
                         continue
+    except Exception:
+        pass
 
-    # 本地备用路径（Windows / Mac）
+    # 2. 常见 Linux 中文字体路径兜底
+    linux_paths = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"
+    ]
+    for path in linux_paths:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, font_size)
+            except Exception:
+                continue
+
+    # 3. 本地备用路径（Windows / Mac）
     fallback_paths = [
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttc",
