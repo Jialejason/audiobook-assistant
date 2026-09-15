@@ -5,3 +5,4 @@ requests
 Pillow
 pypdf
 jieba
+youtube-transcript-api
