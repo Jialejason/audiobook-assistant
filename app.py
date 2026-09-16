@@ -19,9 +19,19 @@ from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
 # --------------------------------------------------
-# 0. 环境与依赖严格诊断 (包含原生 FFmpeg 路径补全与 imageio 适配)
+# 0. 环境与依赖严格诊断 (包含原生 FFmpeg 路径补全与 Python 3.14 audioop 适配)
 # --------------------------------------------------
-# 💡 关键修复：强制补全 Linux 系统二进制路径到 PATH 环境变量
+# 💡 关键修复 1：兼容 Python 3.13+ / 3.14 移除的 audioop 内置库
+try:
+    import audioop
+except ImportError:
+    try:
+        import pyaudioop as audioop
+        sys.modules["audioop"] = audioop
+    except ImportError:
+        pass
+
+# 💡 关键修复 2：强制补全 Linux 系统二进制路径到 PATH 环境变量
 for path_dir in ["/usr/bin", "/usr/local/bin", "/bin"]:
     if path_dir not in os.environ.get("PATH", "").split(os.path.pathsep):
         os.environ["PATH"] = path_dir + os.path.pathsep + os.environ.get("PATH", "")
@@ -36,56 +46,6 @@ try:
     HAS_PYDUB = True
 except ImportError as e:
     FFMPEG_ERROR_MSG = f"pydub 导入失败: {e}"
-
-if HAS_PYDUB:
-    # 🔍 方案 1：优先全路径扫描 Linux 系统原生安装的 ffmpeg / ffprobe
-    possible_ffmpeg_paths = [
-        shutil.which("ffmpeg"),
-        "/usr/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-        "/bin/ffmpeg"
-    ]
-    possible_ffprobe_paths = [
-        shutil.which("ffprobe"),
-        "/usr/bin/ffprobe",
-        "/usr/local/bin/ffprobe",
-        "/bin/ffprobe"
-    ]
-
-    ffmpeg_sys = next((p for p in possible_ffmpeg_paths if p and os.path.exists(p)), None)
-    ffprobe_sys = next((p for p in possible_ffprobe_paths if p and os.path.exists(p)), None)
-
-    if ffmpeg_sys:
-        AudioSegment.converter = ffmpeg_sys
-        if ffprobe_sys:
-            AudioSegment.ffprobe = ffprobe_sys
-        FFMPEG_READY = True
-        FFMPEG_SOURCE = f"Linux 系统原生 ({ffmpeg_sys})"
-    else:
-        # 🔍 方案 2：若系统原生绝对路径未找到，尝试接管 imageio-ffmpeg
-        try:
-            import imageio_ffmpeg
-            real_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-
-            tmp_bin_dir = "/tmp/bin"
-            os.makedirs(tmp_bin_dir, exist_ok=True)
-            tmp_ffmpeg = os.path.join(tmp_bin_dir, "ffmpeg")
-
-            if not os.path.exists(tmp_ffmpeg):
-                shutil.copy(real_ffmpeg, tmp_ffmpeg)
-                os.chmod(tmp_ffmpeg, 0o755)
-
-            os.environ["PATH"] = tmp_bin_dir + os.path.pathsep + os.environ.get("PATH", "")
-            AudioSegment.converter = tmp_ffmpeg
-            if ffprobe_sys:
-                AudioSegment.ffprobe = ffprobe_sys
-
-            FFMPEG_READY = True
-            FFMPEG_SOURCE = "imageio-ffmpeg 引擎"
-        except Exception as err:
-            FFMPEG_READY = False
-            FFMPEG_ERROR_MSG = str(err)
-            FFMPEG_SOURCE = "未检测到可用 FFmpeg"
 
 CACHE_DIR = ".audio_cache"
 BGM_DIR = "."
