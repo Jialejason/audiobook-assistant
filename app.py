@@ -136,29 +136,48 @@ def extract_youtube_id(url):
 
 @st.cache_data(show_spinner=False, ttl=1800)
 def fetch_youtube_transcript_backend(video_id):
-    """Python 后端直接全语种抓取 YouTube 字幕"""
+    """Python 后端全版本兼容字幕抓取引擎（三重备用机制）"""
     if not HAS_YOUTUBE_API:
         return False, "未安装 youtube_transcript_api 库", "en"
+    
+    preferred_langs = ['en', 'zh-Hans', 'zh-Hant', 'zh', 'ja', 'es', 'de', 'fr', 'ko']
+    
+    # 1. 第一重方案：使用 get_transcript 指定语言
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        # 优先语言匹配顺序：英文、繁体、简体、日文、西班牙语、德语、法语
-        preferred_langs = ['en', 'zh-Hant', 'zh-Hans', 'zh-TW', 'zh-CN', 'zh', 'ja', 'es', 'de', 'fr', 'ko']
-        try:
-            transcript = transcript_list.find_transcript(preferred_langs)
-        except Exception:
-            # 若优先语言未找到，取视频自带的任意第一个公开字幕
-            transcript = next(iter(transcript_list))
-        
-        data = transcript.fetch()
+        data = YouTubeTranscriptApi.get_transcript(video_id, languages=preferred_langs)
         full_text = " ".join([item['text'] for item in data])
-        return True, full_text, transcript.language_code
-    except TranscriptsDisabled:
-        return False, "抓取失败：该视频已被作者关闭公开 CC 字幕。", "zh"
-    except Exception as e:
-        return False, f"后端抓取受限: {str(e)}", "zh"
+        return True, full_text, "auto"
+    except Exception:
+        pass
+
+    # 2. 第二重方案：使用 get_transcript 默认抓取
+    try:
+        data = YouTubeTranscriptApi.get_transcript(video_id)
+        full_text = " ".join([item['text'] for item in data])
+        return True, full_text, "auto"
+    except Exception:
+        pass
+
+    # 3. 第三重方案：尝试使用 list_transcripts（若版本支持）
+    try:
+        if hasattr(YouTubeTranscriptApi, 'list_transcripts'):
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            try:
+                transcript = transcript_list.find_transcript(preferred_langs)
+            except Exception:
+                transcript = next(iter(transcript_list))
+            data = transcript.fetch()
+            full_text = " ".join([item['text'] for item in data])
+            return True, full_text, getattr(transcript, 'language_code', 'auto')
+    except Exception:
+        pass
+
+    return False, "后端抓取受限（可能云端 IP 被限制或未开启公开 CC 字幕）", "zh"
 
 def detect_language(text):
     """简易语种识别引擎"""
+    if not text or len(text.strip()) == 0:
+        return 'zh'
     if re.search(r'[\u4e00-\u9fa5]', text):
         return 'zh'
     elif re.search(r'[\u3040-\u30ff]', text):
@@ -288,8 +307,8 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
             
             if success:
                 raw_text = yt_text
-                detected_lang_code = lang_code
-                st.success(f"🎉 字幕抓取成功！检测到语言标记: [{lang_code}]，共 {len(raw_text)} 个字符。")
+                detected_lang_code = detect_language(raw_text)
+                st.success(f"🎉 字幕抓取成功！共提取到 {len(raw_text)} 个字符。")
                 st.text_area("📹 提取的字幕文本预览", raw_text, height=140)
             else:
                 st.warning(f"⚠️ {yt_text}")
@@ -741,7 +760,6 @@ def extract_ultimate_local_insights(text):
     char_count = len(text)
     read_minutes = round(char_count / 300, 1)
 
-    # 智能判别是否含有中文
     has_chinese = bool(re.search(r'[\u4e00-\u9fa5]', text))
 
     if has_chinese:
@@ -749,7 +767,6 @@ def extract_ultimate_local_insights(text):
             text, topK=6, withWeight=False, allowPOS=("n", "vn", "nz", "nr", "nt", "eng")
         )
     else:
-        # 英文等非中文文本关键词简易抓取
         words = re.findall(r'\b[A-Za-z]{4,}\b', text)
         keywords = list(set(words))[:6]
 
