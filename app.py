@@ -57,7 +57,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手 (Global Ultimate Edition)")
 st.caption(
-    "全能旗舰版：300+ 中英双语 AI 音色 + 倍速调节 + 电子书/PDF深度清洗 + YouTube纯净字幕"
+    "全能旗舰版：全源深度清洗引擎 + 300+ 中英双语 AI 音色 + 倍速调节 + 全格式电子书支持"
 )
 
 # --------------------------------------------------
@@ -77,52 +77,69 @@ with st.sidebar:
     )
 
 # --------------------------------------------------
-# 3. 文本深度清洗与高级网页/字幕解析函数
+# 3. 核心：全源通用深度智能清洗引擎 (Universal Text Cleaner)
 # --------------------------------------------------
-def clean_extracted_pdf_text(text):
-    """深度清洗 PDF/电子书提取文本：强力过滤页码、页眉杂音与非法换行"""
+def clean_extracted_text(text):
+    """
+    全源通用深度智能清洗引擎：
+    适用于 TXT / PDF / DOCX / EPUB / 网页正文 / YouTube 字幕 / 粘贴文本
+    彻底剔除：页码、连排跨页页码、印刷编码、版权黑名单、排版杂音、全角标点异化、非标点断行
+    """
     if not text:
         return ""
+    
+    # 1. 规范化非标准全角标点，修复 TTS 断句停顿怪异问题
+    text = text.replace('﹗', '！').replace('﹖', '？').replace('......', '……')
+
     lines = text.split("\n")
     cleaned_lines = []
     
-    # 常见水印、页眉页脚与垃圾占位符过滤词
-    noise_keywords = ["家庭发展基金", "ICAC", "署政", "編者的話", "智多多大道理小故事"]
+    # 2. 繁简双语黑名单关键词（全面拦截机构版权、页眉页脚、推广杂音）
+    noise_keywords = [
+        "家庭发展基金", "家庭發展基金", "ICAC", "廉政公署", "署政", 
+        "编者的话", "編者的話", "智多多大道理小故事", "智多多", 
+        "製作", "制作", "贊助", "赞助", "版权所有", "版權所有",
+        "All rights reserved", "ISBN", "关注微信公众号", "点击上方蓝字"
+    ]
+    
+    # 3. 垃圾占位符与孤立排版字符
     noise_symbols = {"M", "W", "NNN", "B", "FES", "0", "00", "000"}
 
-    # 专门针对各类页码的正则表达式（解决念页码的怪异感）
+    # 4. 增强版正则：精准识别各种形态的页码、跨页连排页码、分数页码及印刷编码
     page_patterns = [
-        r'^\s*\d+\s*$',                 # 纯数字: "12"
-        r'^\s*-\s*\d+\s*-\s*$',         # 带横杠: "- 12 -"
-        r'^\s*第\s*\d+\s*页\s*$',       # 中文页码: "第 12 页"
+        r'^\s*\d+(\s+\d+)*\s*$',         # 纯数字 "12" 以及双页码 "2 3", "4 5", "20 21"
+        r'^\s*-\s*\d+\s*-\s*$',         # 带横杠页码: "- 12 -"
+        r'^\s*第\s*\d+\s*[页頁]\s*$',     # 繁简中文页码: "第 12 页" / "第 12 頁"
         r'^\s*Page\s*\d+\s*$',          # 英文页码: "Page 12"
+        r'^[A-Z0-9_\-]+/\d+.*$',        # 印刷出版批号: "J4345_04/10製作"
+        r'^\s*\d+\s*/\s*\d+\s*$',       # 分数型页码: "1/22"
     ]
 
     for line in lines:
         l = line.strip()
         
-        # 1. 过滤空行与单字母杂音
+        # 过滤空行与孤立占位符
         if not l or l in noise_symbols:
             continue
             
-        # 2. 强力正则匹配过滤各类页码
-        is_page_num = False
+        # 匹配并过滤页码与印刷代码
+        is_noise = False
         for pattern in page_patterns:
             if re.match(pattern, l, re.IGNORECASE):
-                is_page_num = True
+                is_noise = True
                 break
-        if is_page_num:
+        if is_noise:
             continue
             
-        # 3. 过滤页眉页脚机构名称
+        # 过滤黑名单关键词
         if any(kw in l for kw in noise_keywords):
             continue
             
         cleaned_lines.append(l)
 
     full_text = "\n".join(cleaned_lines)
-    # 4. 修复被 PDF 强行截断的句中换行（非标点符号结尾的换行连起来）
-    full_text = re.sub(r'([^。！？!？\n])\n([^。！？!？\n])', r'\1\2', full_text)
+    # 5. 修复被版面强行截断的句中换行（非标点符号结尾的换行连起来）
+    full_text = re.sub(r'([^。！？!？…\n])\n([^。！？!？…\n])', r'\1\2', full_text)
     return full_text.strip()
 
 def parse_youtube_subtitle_text(raw_str):
@@ -303,7 +320,7 @@ def run_async_safe(coroutine):
             loop.close()
 
 # --------------------------------------------------
-# 4. 多功能输入层 (扩充 EPUB/DOCX + 文本编辑预览)
+# 4. 多功能输入层 (所有输入模式统一流经深度清洗引擎)
 # --------------------------------------------------
 st.subheader("📥 导入阅读内容")
 input_mode = st.radio(
@@ -328,16 +345,16 @@ if input_mode == "✍️ 粘贴纯文本或单页网址(URL)":
                 try:
                     fetched = fetch_text_from_url(text_candidate)
                     if len(fetched) > 50 and not fetched.startswith("http"):
-                        raw_text = fetched
+                        raw_text = clean_extracted_text(fetched)
                         st.success(f"🎉 网页解析成功！共提取到 {len(raw_text)} 个字符。")
                     else:
                         st.warning("⚠️ 该网页设置了加密防爬，已为你恢复文本模式，请直接复制网页里的文字粘贴进来！")
-                        raw_text = user_input
+                        raw_text = clean_extracted_text(user_input)
                 except Exception as e:
                     st.warning(f"无法读取该网址正文: {e}，请直接复制文本粘贴输入。")
-                    raw_text = user_input
+                    raw_text = clean_extracted_text(user_input)
         else:
-            raw_text = user_input
+            raw_text = clean_extracted_text(user_input)
         detected_lang_code = detect_language(raw_text)
 
 elif input_mode == "📚 智能分章节整本听书 (目录网址)":
@@ -402,7 +419,8 @@ elif input_mode == "📚 智能分章节整本听书 (目录网址)":
         current_ch_url = chapters[idx]['url']
         with st.spinner(f"正在加载【{chapters[idx]['title']}】正文内容..."):
             try:
-                raw_text = fetch_text_from_url(current_ch_url)
+                ch_fetched = fetch_text_from_url(current_ch_url)
+                raw_text = clean_extracted_text(ch_fetched)
                 st.info(f"✅ 本章加载成功，共 {len(raw_text)} 个字符。点击下方按钮即可一键听书或提炼！")
                 detected_lang_code = detect_language(raw_text)
             except Exception as e:
@@ -421,7 +439,7 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
                 success, yt_text, lang_code = fetch_youtube_transcript_backend(video_id, yt_url.strip())
             
             if success:
-                raw_text = yt_text
+                raw_text = clean_extracted_text(yt_text)
                 detected_lang_code = detect_language(raw_text)
                 st.success(f"🎉 字幕抓取成功！共提取到 {len(raw_text)} 个字符。")
                 st.text_area("📹 提取的字幕文本预览", raw_text, height=140)
@@ -536,8 +554,8 @@ else:
             else:
                 st.error("未安装 ebooklib 依赖！请在终端运行: pip install ebooklib")
 
-        # 调用深度清洗逻辑（剔除页码与干扰词）
-        raw_text = clean_extracted_pdf_text(extracted_raw)
+        # 核心：上传的 .txt / .pdf / .docx / .epub 全面统一通过深度清洗引擎
+        raw_text = clean_extracted_text(extracted_raw)
         
         if len(raw_text.strip()) > 0:
             st.success(f"🎉 成功导入并深度清洗文件，共提取到 {len(raw_text)} 个有效字符！")
@@ -670,7 +688,6 @@ with speech_col2:
         help="支持 0.5x 慢速精听 到 2.0x 快速听书"
     )
 
-# 转换语速百分比字符串格式 (+20%, -10%)
 rate_percentage = int(round((speech_rate_val - 1.0) * 100))
 rate_str = f"{rate_percentage:+d}%"
 
@@ -736,7 +753,6 @@ async def synth_single_chunk(chunk, voice, rate_str="+0%"):
     except Exception:
         pass
     
-    # 彻底防崩溃：不兼容时自动切至多语言备用音色
     if len(audio_data) == 0:
         fallback_voice = "zh-CN-XiaoxiaoNeural" if re.search(r'[\u4e00-\u9fa5]', chunk) else "en-US-AvaMultilingualNeural"
         try:
