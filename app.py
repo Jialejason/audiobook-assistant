@@ -4,8 +4,11 @@ import json
 import os
 import re
 import hashlib
+import shutil
 import subprocess
+import sys
 from urllib.parse import urljoin, urlparse
+
 import jieba
 import jieba.analyse
 import requests
@@ -16,12 +19,12 @@ from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
 # --------------------------------------------------
-# 0. 环境与依赖严格诊断 (包含原生 FFmpeg 与 imageio 适配)
+# 0. 环境与依赖严格诊断 (包含原生 FFmpeg 路径补全与 imageio 适配)
 # --------------------------------------------------
-import os
-import sys
-import shutil
-import subprocess
+# 💡 关键修复：强制补全 Linux 系统二进制路径到 PATH 环境变量
+for path_dir in ["/usr/bin", "/usr/local/bin", "/bin"]:
+    if path_dir not in os.environ.get("PATH", "").split(os.path.pathsep):
+        os.environ["PATH"] = path_dir + os.path.pathsep + os.environ.get("PATH", "")
 
 HAS_PYDUB = False
 FFMPEG_READY = False
@@ -35,10 +38,23 @@ except ImportError as e:
     FFMPEG_ERROR_MSG = f"pydub 导入失败: {e}"
 
 if HAS_PYDUB:
-    # 方案 1：优先检测 Linux 系统原生安装的 ffmpeg (packages.txt)
-    ffmpeg_sys = shutil.which("ffmpeg")
-    ffprobe_sys = shutil.which("ffprobe")
-    
+    # 🔍 方案 1：优先全路径扫描 Linux 系统原生安装的 ffmpeg / ffprobe
+    possible_ffmpeg_paths = [
+        shutil.which("ffmpeg"),
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/bin/ffmpeg"
+    ]
+    possible_ffprobe_paths = [
+        shutil.which("ffprobe"),
+        "/usr/bin/ffprobe",
+        "/usr/local/bin/ffprobe",
+        "/bin/ffprobe"
+    ]
+
+    ffmpeg_sys = next((p for p in possible_ffmpeg_paths if p and os.path.exists(p)), None)
+    ffprobe_sys = next((p for p in possible_ffprobe_paths if p and os.path.exists(p)), None)
+
     if ffmpeg_sys:
         AudioSegment.converter = ffmpeg_sys
         if ffprobe_sys:
@@ -46,22 +62,24 @@ if HAS_PYDUB:
         FFMPEG_READY = True
         FFMPEG_SOURCE = f"Linux 系统原生 ({ffmpeg_sys})"
     else:
-        # 方案 2：若系统原生未找到，尝试接管 imageio-ffmpeg
+        # 🔍 方案 2：若系统原生绝对路径未找到，尝试接管 imageio-ffmpeg
         try:
             import imageio_ffmpeg
             real_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-            
+
             tmp_bin_dir = "/tmp/bin"
             os.makedirs(tmp_bin_dir, exist_ok=True)
             tmp_ffmpeg = os.path.join(tmp_bin_dir, "ffmpeg")
-            
+
             if not os.path.exists(tmp_ffmpeg):
                 shutil.copy(real_ffmpeg, tmp_ffmpeg)
                 os.chmod(tmp_ffmpeg, 0o755)
-                
+
             os.environ["PATH"] = tmp_bin_dir + os.path.pathsep + os.environ.get("PATH", "")
             AudioSegment.converter = tmp_ffmpeg
-            
+            if ffprobe_sys:
+                AudioSegment.ffprobe = ffprobe_sys
+
             FFMPEG_READY = True
             FFMPEG_SOURCE = "imageio-ffmpeg 引擎"
         except Exception as err:
@@ -151,8 +169,8 @@ with st.sidebar:
     if HAS_PYDUB and FFMPEG_READY:
         st.success(f"✅ BGM / 多角色混音引擎就绪\n({FFMPEG_SOURCE})")
     else:
-        st.error("❌ BGM 混音受阻：未检测到 FFmpeg！")
-        st.info("💡 解决办法：请在 requirements.txt 中添加一行 `imageio-ffmpeg`，系统将自动绑定启动！")
+        st.error(f"❌ BGM 混音受阻：未检测到 FFmpeg！\n(详情: {FFMPEG_ERROR_MSG if FFMPEG_ERROR_MSG else '路径检测失败'})")
+        st.info("💡 解决办法：请确认 packages.txt 中包含 `ffmpeg`，或在 requirements.txt 中添加 `imageio-ffmpeg`。")
 
     st.divider()
     
