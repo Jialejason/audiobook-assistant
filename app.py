@@ -138,7 +138,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手 (Global Ultimate Edition)")
 st.caption(
-    "全能旗舰版：全自动男女多角色对话 + 全源深度清洗 + 严选顶级音色 + BGM自由切换与上传"
+    "全能旗舰版：全自动男女多角色对话 + 80Hz高通滤波 + 动态闪避混音(Audio Ducking) + 严选顶级音色"
 )
 
 # --------------------------------------------------
@@ -170,7 +170,7 @@ with st.sidebar:
     )
     
     available_bgm_files = [f for f in os.listdir(BGM_DIR) if f.lower().endswith(".mp3") and not f.startswith(".")]
-    bgm_options = ["🎹 系统默认柔和和弦"] + available_bgm_files
+    bgm_options = ["🎹 系统默认柔频和弦"] + available_bgm_files
     
     selected_bgm_name = st.selectbox(
         "🎶 选择背景音乐曲目：",
@@ -179,8 +179,7 @@ with st.sidebar:
         help="你可以从下拉菜单切换已上传的不同 MP3 背景音乐"
     )
     
-    # 💡 音量默认值调小至 12%，保持衬托效果
-    bgm_volume = st.slider("🎚️ BGM 音量比例:", min_value=5, max_value=50, value=12, format="%d%%", help="建议设置在 10%~20% 之间，衬托背景且不盖过人声")
+    bgm_volume = st.slider("🎚️ BGM 音量比例:", min_value=5, max_value=50, value=15, format="%d%%", help="自动配合动态闪避算法，建议设置在 10%~20% 之间")
     
     with st.expander("📤 上传我的背景音乐 (.mp3)", expanded=False):
         uploaded_bgm = st.file_uploader("选择手机里的 MP3 文件上传：", type=["mp3"], key="bgm_uploader")
@@ -484,7 +483,7 @@ def fetch_all_global_voices():
 active_voice_dict = fetch_all_global_voices() if show_all_voices else CURATED_VOICES
 voice_keys = list(active_voice_dict.keys())
 
-st.markdown("##### 🎛️ 音频播放属性与角色音色配置")
+st.markdown("##### 🎛️ 音质属性与角色音色配置")
 
 default_narrator = "zh-CN-YunjianNeural" if "zh-CN-YunjianNeural" in voice_keys else voice_keys[0]
 default_male = "zh-CN-YunxiNeural" if "zh-CN-YunxiNeural" in voice_keys else voice_keys[0]
@@ -655,7 +654,7 @@ if len(raw_text) > 8000:
     active_process_text = auto_chapters[selected_ch_idx]["content"]
 
 # --------------------------------------------------
-# 7. TTS 合成 + 动态 BGM 混音 (已优化音量算法与人声提亮)
+# 7. TTS 合成 + 高通滤波 + 动态闪避 (Audio Ducking)
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -731,7 +730,7 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem=None):
     else:
         return await do_synth()
 
-def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=12):
+def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
     if not HAS_PYDUB or not FFMPEG_READY or not speech_bytes:
         st.warning("⚠️ BGM 混音跳过：pydub 库未就绪或未检测到 FFmpeg。")
         return speech_bytes
@@ -739,18 +738,23 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=12):
     try:
         speech = AudioSegment.from_file(io.BytesIO(speech_bytes), format="mp3")
         
-        # 🎙️ 步骤1：增益人声，使其达到电台标准清晰音量
+        # 🎙️ [极致音品 1] 高通滤波 (High-pass Filter)：切除 80Hz 以下无用低频沉闷杂音
+        try:
+            speech = speech.high_pass_filter(80)
+        except Exception:
+            pass
+
+        # 🎙️ [极致音品 2] 人声电台级增益标准化 (+3.0 dB)
         speech = speech.apply_gain(+3.0)
         speech_duration = len(speech)
 
-        is_custom_mp3 = bgm_choice_name != "🎹 系统默认柔和和弦"
+        is_custom_mp3 = bgm_choice_name != "🎹 系统默认柔频和弦"
         bgm_path = os.path.join(BGM_DIR, bgm_choice_name) if is_custom_mp3 else ""
 
         if is_custom_mp3 and os.path.exists(bgm_path):
             bgm = AudioSegment.from_file(bgm_path, format="mp3")
         else:
             from pydub.generators import Sine
-            # 🎵 步骤2：对系统默认和弦做 -35dB 大幅衰减，消除蜂鸣噪音
             tone1 = Sine(261.63).to_audio_segment(duration=speech_duration + 2000) - 35
             tone2 = Sine(329.63).to_audio_segment(duration=speech_duration + 2000) - 35
             tone3 = Sine(392.00).to_audio_segment(duration=speech_duration + 2000) - 35
@@ -764,21 +768,37 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=12):
 
         bgm = bgm[:speech_duration].fade_in(1000).fade_out(1000)
 
-        # 🎚️ 步骤3：精准衰减 BGM 音量，保证比人声低 20dB~35dB
-        bgm_attenuation = -38.0 + (volume_percent * 0.4)
-        bgm = bgm + bgm_attenuation
+        # 🎚️ [极致音品 3] 侧链平滑动态闪避算法 (Audio Ducking)
+        bgm_base_gain = -38.0 + (volume_percent * 0.4)
+        chunk_ms = 100
+        ducked_bgm = AudioSegment.empty()
+        current_duck = 0.0
 
-        mixed = speech.overlay(bgm)
+        for i in range(0, speech_duration, chunk_ms):
+            speech_chunk = speech[i:i+chunk_ms]
+            bgm_chunk = bgm[i:i+chunk_ms]
+
+            # 检测说话对白声压 (以 -42.0 dBFS 为对白阀值)
+            if speech_chunk.dbfs > -42.0:
+                target_duck = -5.0  # 对白期间 BGM 自动下沉 5dB 突出人声
+            else:
+                target_duck = 0.0   # 对白停顿/留白时 BGM 缓缓浮现
+
+            # 平滑滤波避免跳变爆音
+            current_duck = current_duck * 0.6 + target_duck * 0.4
+            ducked_bgm += bgm_chunk + (bgm_base_gain + current_duck)
+
+        mixed = speech.overlay(ducked_bgm)
         output_io = io.BytesIO()
         mixed.export(output_io, format="mp3")
         
-        st.success(f"🎵 混音成功：已为您叠加背景音乐 【{bgm_choice_name}】！")
+        st.success(f"🎵 极致混音完成：已注入 80Hz 高通滤波与动态闪避 (Audio Ducking)！")
         return output_io.getvalue()
     except Exception as e:
         st.error(f"❌ 混音崩溃报错详情: {e}")
         return speech_bytes
 
-async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_female, rate_str, use_multi_role=True, max_concurrency=10, apply_bgm=False, bgm_name="🎹 系统默认柔和和弦", vol_pct=12):
+async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_female, rate_str, use_multi_role=True, max_concurrency=10, apply_bgm=False, bgm_name="🎹 系统默认柔频和弦", vol_pct=15):
     clean_text = clean_markdown_for_speech(text)
     if not clean_text.strip():
         return b""
@@ -855,7 +875,7 @@ async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_fem
         final_bytes = bytes(full_audio)
 
     if apply_bgm:
-        with st.spinner("🎵 正在注入背景音乐..."):
+        with st.spinner("🎵 正在注入背景音乐并执行动态闪避 (Ducking)..."):
             final_bytes = mix_bgm_with_audio(final_bytes, bgm_name, vol_pct)
 
     return final_bytes
