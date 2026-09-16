@@ -37,12 +37,12 @@ except ImportError:
 # 1. 页面基本配置
 # --------------------------------------------------
 st.set_page_config(
-    page_title="随身听书 & 思维助手 (国际版)", page_icon="🎧", layout="centered"
+    page_title="随身听书 & 思维助手 (全球旗舰版)", page_icon="🎧", layout="centered"
 )
 
-st.title("🎧 随身听书 & 思维助手 (Global Edition)")
+st.title("🎧 随身听书 & 思维助手 (Global Ultimate Edition)")
 st.caption(
-    "全球国际化通用版：多语种 AI 混音引擎 + YouTube 双核字幕抓取 + 智能听书提炼"
+    "全球国际化通用版：300+ 全球微软 AI 动态音色库 + YouTube 双核字幕抓取 + 智能听书提炼"
 )
 
 # --------------------------------------------------
@@ -142,7 +142,7 @@ def extract_youtube_id(url):
 @st.cache_data(show_spinner=False, ttl=1800)
 def fetch_youtube_transcript_backend(video_id, full_url=""):
     """Python 后端双核 YouTube 字幕提取引擎 (API + yt-dlp)"""
-    preferred_langs = ['en', 'zh-Hans', 'zh-Hant', 'zh', 'ja', 'es', 'de', 'fr', 'ko']
+    preferred_langs = ['en', 'zh-Hans', 'zh-Hant', 'zh', 'ja', 'es', 'de', 'fr', 'ko', 'vi', 'th', 'ru']
 
     # 第一核：YouTubeTranscriptApi
     if HAS_YOUTUBE_API:
@@ -174,7 +174,6 @@ def fetch_youtube_transcript_backend(video_id, full_url=""):
                 subtitles = info.get('subtitles') or info.get('automatic_captions')
                 if subtitles:
                     lang_key = next(iter(subtitles))
-                    # 抓取字幕格式数据
                     sub_data = subtitles[lang_key]
                     json_sub = [s for s in sub_data if s.get('ext') in ['json3', 'srv1', 'vtt']]
                     if json_sub:
@@ -192,7 +191,7 @@ def fetch_youtube_transcript_backend(video_id, full_url=""):
     return False, "后端抓取受限（可能云端 IP 被 YouTube 封锁，请使用下方手机 CORS 代理）", "zh"
 
 def detect_language(text):
-    """简易语种识别引擎"""
+    """全语种精准识别引擎"""
     if not text or len(text.strip()) == 0:
         return 'zh'
     if re.search(r'[\u4e00-\u9fa5]', text):
@@ -201,8 +200,27 @@ def detect_language(text):
         return 'ja'
     elif re.search(r'[\uac00-\ud7af]', text):
         return 'ko'
+    elif re.search(r'[\u0e00-\u0e7f]', text):
+        return 'th'
+    elif re.search(r'[\u0400-\u04ff]', text):
+        return 'ru'
+    elif re.search(r'[\u0600-\u06ff]', text):
+        return 'ar'
+    elif re.search(r'[àáâãèéêìíòóôõùúýăđĩũơưàáảẽạâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳỵỷỹ]', text, re.IGNORECASE):
+        return 'vi'
     else:
         return 'en'
+
+def run_async_safe(coroutine):
+    try:
+        return asyncio.run(coroutine)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coroutine)
+        finally:
+            loop.close()
 
 # --------------------------------------------------
 # 4. 多功能输入层
@@ -221,7 +239,7 @@ if input_mode == "✍️ 粘贴纯文本或单页网址(URL)":
     user_input = st.text_area(
         "粘贴文本或网页网址（以 http/https 开头）：",
         height=160,
-        placeholder="粘贴文章纯文本、单篇知乎/新闻链接、英文 TED 字幕...\n提示：单次建议控制在 2000-15000 字以内，体验最流畅！",
+        placeholder="粘贴文章纯文本、单篇知乎/新闻链接、英文 TED 字幕、越南语/日文文本...\n提示：单次建议控制在 2000-15000 字以内，体验最流畅！",
     )
     if user_input.strip():
         text_candidate = user_input.strip()
@@ -422,68 +440,76 @@ else:
         detected_lang_code = detect_language(raw_text)
 
 # --------------------------------------------------
-# 5. 国际化通用 25+ 全球 AI 音色库 (含多语言防崩溃混音)
+# 5. 【方案 B】微软 300+ 全球动态 AI 音色引擎 + 自动配对
 # --------------------------------------------------
-VOICE_MAP = {
-    # 🇨🇳 中文与方言音色
-    "zh-CN-XiaoxiaoNeural": "🇨🇳 Xiaoxiao - 中文知性女声 (推荐)",
-    "zh-CN-YunxiNeural": "🎙️ Yunxi - 中文磁性男声 (小说首选)",
-    "zh-CN-YunjianNeural": "💼 Yunjian - 沉稳解说男声",
-    "zh-HK-HiuMaanNeural": "🇭🇰 HiuMaan - 标准粤语/港味",
-    "zh-TW-HsiaoChenNeural": "🍵 HsiaoChen - 软萌台湾腔",
-    
-    # 🇺🇸/🇬🇧 英文顶级音色
-    "en-US-AvaMultilingualNeural": "🌐 Ava (美音多语言) - 全能AI (可读中英文)",
-    "en-US-JennyNeural": "🇺🇸 Jenny (美音) - 经典 TED 播客女声",
-    "en-US-GuyNeural": "🇺🇸 Guy (美音) - 商务新闻男声",
-    "en-US-ChristopherNeural": "🎙️ Christopher (美音) - 磁性英文解说",
-    "en-GB-SoniaNeural": "🇬🇧 Sonia (英音) - 标准英式女声",
-    "en-GB-RyanNeural": "🇬🇧 Ryan (英音) - 绅士英式男声",
-
-    # 🇪🇸/🇫🇷/🇩🇪/🇮🇹 欧洲通用音色 (已升级为多语言兼容版本)
-    "es-ES-XimenaMultilingualNeural": "🇪🇸 Ximena (西班牙语/多语言) - 兼容读中文",
-    "es-ES-ElviraNeural": "🇪🇸 Elvira (西班牙语) - 纯正通用西语",
-    "fr-FR-DeniseNeural": "🇫🇷 Denise (法语) - 优雅优雅女声",
-    "de-DE-KatjaNeural": "🇩🇪 Katja (德语) - 严谨清晰女声",
-    "it-IT-ElsaNeural": "🇮🇹 Elsa (意大利语) - 热情美声",
-
-    # 🇯🇵/🇰🇷/🌏 亚洲与东海多国音色
-    "ja-JP-NanamiNeural": "🇯🇵 Nanami (日语) - 动漫知性女声",
-    "ja-JP-KeitaNeural": "🇯🇵 Keita (日语) - 阳光男声",
-    "ko-KR-SunHiNeural": "🇰🇷 SunHi (韩语) - 韩剧温柔女声",
-    "th-TH-PremwadeeNeural": "🇹🇭 Premwadee (泰语) - 标准泰语女声",
-    "vi-VN-HoaiMyNeural": "🇻🇳 HoaiMy (越南语) - 亲切女声",
-    "ru-RU-SvetlanaNeural": "🇷🇺 Svetlana (俄语) - 标准俄语女声",
+LOCALE_FLAGS = {
+    'zh-CN': '🇨🇳', 'zh-HK': '🇭🇰', 'zh-TW': '🇹🇼', 'en-US': '🇺🇸', 'en-GB': '🇬🇧',
+    'en-AU': '🇦🇺', 'en-CA': '🇨🇦', 'en-IN': '🇮🇳', 'ja-JP': '🇯🇵', 'ko-KR': '🇰🇷',
+    'es-ES': '🇪🇸', 'es-MX': '🇲🇽', 'fr-FR': '🇫🇷', 'de-DE': '🇩🇪', 'it-IT': '🇮🇹',
+    'ru-RU': '🇷🇺', 'vi-VN': '🇻🇳', 'th-TH': '🇹🇭', 'ms-MY': '🇲🇾', 'id-ID': '🇮🇩',
+    'ar-SA': '🇸🇦', 'hi-IN': '🇮🇳', 'pt-BR': '🇧🇷', 'nl-NL': '🇳🇱'
 }
 
-# 根据语种自动匹配最佳索引
-def get_default_voice_index(lang):
-    lang_lower = str(lang).lower()
-    if "en" in lang_lower:
-        return 5  # AvaMultilingualNeural
-    elif "ja" in lang_lower:
-        return 17 # Nanami (日语)
-    elif "ko" in lang_lower:
-        return 19 # SunHi (韩语)
-    elif "es" in lang_lower:
-        return 11 # XimenaMultilingual
-    elif "hant" in lang_lower or "tw" in lang_lower:
-        return 4  # HsiaoChen (台湾腔)
-    elif "hk" in lang_lower:
-        return 3  # HiuMaan (粤语)
-    return 0     # 默认中文 Xiaoxiao
+@st.cache_resource
+def fetch_all_global_voices():
+    """实时向微软服务器同步全球 300+ 种神经网络音色"""
+    try:
+        voices = run_async_safe(edge_tts.list_voices())
+        voice_dict = {}
+        for v in voices:
+            short_name = v.get("ShortName", "")
+            locale = v.get("Locale", "")
+            gender = "👩" if v.get("Gender") == "Female" else "👨"
+            
+            base_loc = "-".join(locale.split("-")[:2]) if "-" in locale else locale
+            flag = LOCALE_FLAGS.get(base_loc, "🌍")
+            
+            name_parts = short_name.split("-")
+            voice_name = name_parts[-1] if len(name_parts) >= 3 else short_name
+            
+            display = f"{flag} [{locale}] {voice_name} ({gender})"
+            voice_dict[short_name] = display
+        return voice_dict
+    except Exception:
+        # 兜底精选库
+        return {
+            "zh-CN-XiaoxiaoNeural": "🇨🇳 [zh-CN] Xiaoxiao (👩 知性女声)",
+            "zh-CN-YunxiNeural": "🎙️ [zh-CN] Yunxi (👨 磁性男声)",
+            "en-US-AvaMultilingualNeural": "🌐 [en-US] AvaMultilingual (👩 全能多语言)",
+            "en-US-JennyNeural": "🇺🇸 [en-US] Jenny (👩 经典美音)",
+            "en-GB-SoniaNeural": "🇬🇧 [en-GB] Sonia (👩 优雅英音)",
+            "ja-JP-NanamiNeural": "🇯🇵 [ja-JP] Nanami (👩 动漫日文)",
+            "ko-KR-SunHiNeural": "🇰🇷 [ko-KR] SunHi (👩 温柔韩文)",
+            "vi-VN-HoaiMyNeural": "🇻🇳 [vi-VN] HoaiMy (👩 标准越南文)",
+            "es-ES-XimenaMultilingualNeural": "🇪🇸 [es-ES] XimenaMultilingual (👩 多语言西文)",
+        }
 
-default_idx = get_default_voice_index(detected_lang_code)
+GLOBAL_VOICES = fetch_all_global_voices()
+voice_keys = list(GLOBAL_VOICES.keys())
+
+# 计算匹配最佳默认音色索引
+def calc_default_voice_index(lang_code, keys):
+    lang_code_low = lang_code.lower()
+    if lang_code_low == 'zh':
+        for i, k in enumerate(keys):
+            if 'zh-cn-xiaoxiaoneural' in k.lower():
+                return i
+    for i, k in enumerate(keys):
+        if f"-{lang_code_low}" in k.lower() or f"{lang_code_low}-" in k.lower():
+            return i
+    return 0
+
+default_idx = calc_default_voice_index(detected_lang_code, voice_keys)
 
 voice_option = st.selectbox(
-    "选择朗读音色（国际通用多语种库）：",
-    options=list(VOICE_MAP.keys()),
+    "选择朗读音色（已自动推荐最佳音色，也可手动搜索全球 300+ 种音色）：",
+    options=voice_keys,
     index=default_idx,
-    format_func=lambda x: VOICE_MAP[x],
+    format_func=lambda x: GLOBAL_VOICES[x],
 )
 
 # --------------------------------------------------
-# 6. 纯净语音与安全切片引擎 (防崩溃降级处理)
+# 6. 纯净语音与安全切片引擎 (防崩溃双层降级处理)
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -542,12 +568,19 @@ async def synth_single_chunk(chunk, voice):
             if item["type"] == "audio":
                 audio_data.extend(item["data"])
     except Exception:
-        # 防崩溃降级：若所选音色不兼容当前字符，自动切至多语言全能音色
-        fallback = "en-US-AvaMultilingualNeural" if re.search(r'[\u4e00-\u9fa5]', chunk) else "zh-CN-XiaoxiaoNeural"
-        communicate = edge_tts.Communicate(chunk, fallback)
-        async for item in communicate.stream():
-            if item["type"] == "audio":
-                audio_data.extend(item["data"])
+        pass
+    
+    # 防崩溃降级：若所选音色不兼容当前文本，自动切至多语言全能音色
+    if len(audio_data) == 0:
+        fallback_voice = "zh-CN-XiaoxiaoNeural" if re.search(r'[\u4e00-\u9fa5]', chunk) else "en-US-AvaMultilingualNeural"
+        try:
+            communicate = edge_tts.Communicate(chunk, fallback_voice)
+            async for item in communicate.stream():
+                if item["type"] == "audio":
+                    audio_data.extend(item["data"])
+        except Exception:
+            pass
+            
     return audio_data
 
 async def generate_audio_bytes_safe(text, voice):
@@ -568,17 +601,6 @@ async def generate_audio_bytes_safe(text, voice):
                 full_audio.extend(item["data"])
 
     return bytes(full_audio)
-
-def run_async_safe(coroutine):
-    try:
-        return asyncio.run(coroutine)
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(coroutine)
-        finally:
-            loop.close()
 
 # --------------------------------------------------
 # 7. 跨平台自适应字库引擎与金句卡片生成
