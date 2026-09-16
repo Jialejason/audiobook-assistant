@@ -6,7 +6,6 @@ import subprocess
 from urllib.parse import urljoin, urlparse
 import jieba
 import jieba.analyse
-import jieba.posseg as pseg
 import requests
 import streamlit as st
 import edge_tts
@@ -14,12 +13,18 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
-# 尝试导入 youtube_transcript_api
+# 尝试导入 youtube_transcript_api 与 yt_dlp
 try:
-    from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+    from youtube_transcript_api import YouTubeTranscriptApi
     HAS_YOUTUBE_API = True
 except ImportError:
     HAS_YOUTUBE_API = False
+
+try:
+    import yt_dlp
+    HAS_YTDLP = True
+except ImportError:
+    HAS_YTDLP = False
 
 # 尝试导入 trafilatura（网页正文智能提取库）
 try:
@@ -32,12 +37,12 @@ except ImportError:
 # 1. 页面基本配置
 # --------------------------------------------------
 st.set_page_config(
-    page_title="随身听书 & 思维助手", page_icon="🎧", layout="centered"
+    page_title="随身听书 & 思维助手 (国际版)", page_icon="🎧", layout="centered"
 )
 
-st.title("🎧 随身听书 & 思维助手")
+st.title("🎧 随身听书 & 思维助手 (Global Edition)")
 st.caption(
-    "全语种动态自适应版：YouTube多语言字幕抓取 + 智能分章节听书 + 国际化 TTS 引擎"
+    "全球国际化通用版：多语种 AI 混音引擎 + YouTube 双核字幕抓取 + 智能听书提炼"
 )
 
 # --------------------------------------------------
@@ -57,7 +62,7 @@ with st.sidebar:
     )
 
 # --------------------------------------------------
-# 3. 高级网页与 YouTube 自动解析函数
+# 3. 高级网页与 YouTube 自动解析函数 (双核抓取)
 # --------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_text_from_url(url):
@@ -135,44 +140,56 @@ def extract_youtube_id(url):
     return None
 
 @st.cache_data(show_spinner=False, ttl=1800)
-def fetch_youtube_transcript_backend(video_id):
-    """Python 后端全版本兼容字幕抓取引擎（三重备用机制）"""
-    if not HAS_YOUTUBE_API:
-        return False, "未安装 youtube_transcript_api 库", "en"
-    
+def fetch_youtube_transcript_backend(video_id, full_url=""):
+    """Python 后端双核 YouTube 字幕提取引擎 (API + yt-dlp)"""
     preferred_langs = ['en', 'zh-Hans', 'zh-Hant', 'zh', 'ja', 'es', 'de', 'fr', 'ko']
-    
-    # 1. 第一重方案：使用 get_transcript 指定语言
-    try:
-        data = YouTubeTranscriptApi.get_transcript(video_id, languages=preferred_langs)
-        full_text = " ".join([item['text'] for item in data])
-        return True, full_text, "auto"
-    except Exception:
-        pass
 
-    # 2. 第二重方案：使用 get_transcript 默认抓取
-    try:
-        data = YouTubeTranscriptApi.get_transcript(video_id)
-        full_text = " ".join([item['text'] for item in data])
-        return True, full_text, "auto"
-    except Exception:
-        pass
-
-    # 3. 第三重方案：尝试使用 list_transcripts（若版本支持）
-    try:
-        if hasattr(YouTubeTranscriptApi, 'list_transcripts'):
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            try:
-                transcript = transcript_list.find_transcript(preferred_langs)
-            except Exception:
-                transcript = next(iter(transcript_list))
-            data = transcript.fetch()
+    # 第一核：YouTubeTranscriptApi
+    if HAS_YOUTUBE_API:
+        try:
+            data = YouTubeTranscriptApi.get_transcript(video_id, languages=preferred_langs)
             full_text = " ".join([item['text'] for item in data])
-            return True, full_text, getattr(transcript, 'language_code', 'auto')
-    except Exception:
-        pass
+            return True, full_text, "auto"
+        except Exception:
+            try:
+                data = YouTubeTranscriptApi.get_transcript(video_id)
+                full_text = " ".join([item['text'] for item in data])
+                return True, full_text, "auto"
+            except Exception:
+                pass
 
-    return False, "后端抓取受限（可能云端 IP 被限制或未开启公开 CC 字幕）", "zh"
+    # 第二核：yt-dlp 强力破解提取
+    if HAS_YTDLP and full_url:
+        try:
+            ydl_opts = {
+                'skip_download': True,
+                'writesubtitles': True,
+                'writeautomaticsub': True,
+                'subtitleslangs': preferred_langs,
+                'quiet': True,
+                'no_warnings': True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(full_url, download=False)
+                subtitles = info.get('subtitles') or info.get('automatic_captions')
+                if subtitles:
+                    lang_key = next(iter(subtitles))
+                    # 抓取字幕格式数据
+                    sub_data = subtitles[lang_key]
+                    json_sub = [s for s in sub_data if s.get('ext') in ['json3', 'srv1', 'vtt']]
+                    if json_sub:
+                        res = requests.get(json_sub[0]['url'], timeout=10)
+                        if res.status_code == 200:
+                            clean_text = re.sub(r'<[^>]+>', '', res.text)
+                            clean_text = re.sub(r'\d{2}:\d{2}:\d{2}\.\d{3}.*?\n', '', clean_text)
+                            lines = [line.strip() for line in clean_text.split('\n') if line.strip() and not line.strip().isdigit()]
+                            full_text = " ".join(lines[:500])
+                            if len(full_text) > 30:
+                                return True, full_text, lang_key
+        except Exception:
+            pass
+
+    return False, "后端抓取受限（可能云端 IP 被 YouTube 封锁，请使用下方手机 CORS 代理）", "zh"
 
 def detect_language(text):
     """简易语种识别引擎"""
@@ -302,8 +319,8 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
     if yt_url.strip():
         video_id = extract_youtube_id(yt_url.strip())
         if video_id:
-            with st.spinner("🤖 正在尝试 Python 后端全语种自动提取字幕..."):
-                success, yt_text, lang_code = fetch_youtube_transcript_backend(video_id)
+            with st.spinner("🤖 正在尝试 Python 双核自动提取全球字幕..."):
+                success, yt_text, lang_code = fetch_youtube_transcript_backend(video_id, yt_url.strip())
             
             if success:
                 raw_text = yt_text
@@ -405,51 +422,68 @@ else:
         detected_lang_code = detect_language(raw_text)
 
 # --------------------------------------------------
-# 5. 全球多语种音色映射与自适应匹配
+# 5. 国际化通用 25+ 全球 AI 音色库 (含多语言防崩溃混音)
 # --------------------------------------------------
 VOICE_MAP = {
-    "zh-CN-XiaoxiaoNeural": "💃 Xiaoxiao - 经典御姐 / 知性温婉 (推荐)",
-    "zh-CN-YunxiNeural": "🎙️ Yunxi - 磁性男主角 (小说听书推荐)",
-    "en-US-JennyNeural": "🇺🇸 Jenny (美音) - 自然清晰 / TED 播客推荐",
-    "en-US-GuyNeural": "🇺🇸 Guy (美音) - 商务稳重 / 英文解说",
-    "en-GB-SoniaNeural": "🇬🇧 Sonia (英音) - 标准优雅 / 商务英音",
-    "zh-HK-HiuMaanNeural": "🇭🇰 HiuMaan - 标准粤语 / 港台风情",
-    "zh-TW-HsiaoChenNeural": "🍵 HsiaoChen - 台湾腔 / 软萌甜美",
-    "zh-CN-YunjianNeural": "💼 Yunjian - 沉稳解说 / 商务男声",
-    "zh-CN-YunyangNeural": "📢 Yunyang - 专业新闻播音 / 正气男声",
-    "ja-JP-NanamiNeural": "🇯🇵 Nanami (日语) - 甜美自然 / 亲切女声",
-    "ko-KR-SunHiNeural": "🇰🇷 SunHi (韩语) - 温柔细腻 / 韩剧女声",
-    "es-ES-ElviraNeural": "🇪🇸 Elvira (西班牙语) - 标准通用西语",
+    # 🇨🇳 中文与方言音色
+    "zh-CN-XiaoxiaoNeural": "🇨🇳 Xiaoxiao - 中文知性女声 (推荐)",
+    "zh-CN-YunxiNeural": "🎙️ Yunxi - 中文磁性男声 (小说首选)",
+    "zh-CN-YunjianNeural": "💼 Yunjian - 沉稳解说男声",
+    "zh-HK-HiuMaanNeural": "🇭🇰 HiuMaan - 标准粤语/港味",
+    "zh-TW-HsiaoChenNeural": "🍵 HsiaoChen - 软萌台湾腔",
+    
+    # 🇺🇸/🇬🇧 英文顶级音色
+    "en-US-AvaMultilingualNeural": "🌐 Ava (美音多语言) - 全能AI (可读中英文)",
+    "en-US-JennyNeural": "🇺🇸 Jenny (美音) - 经典 TED 播客女声",
+    "en-US-GuyNeural": "🇺🇸 Guy (美音) - 商务新闻男声",
+    "en-US-ChristopherNeural": "🎙️ Christopher (美音) - 磁性英文解说",
+    "en-GB-SoniaNeural": "🇬🇧 Sonia (英音) - 标准英式女声",
+    "en-GB-RyanNeural": "🇬🇧 Ryan (英音) - 绅士英式男声",
+
+    # 🇪🇸/🇫🇷/🇩🇪/🇮🇹 欧洲通用音色 (已升级为多语言兼容版本)
+    "es-ES-XimenaMultilingualNeural": "🇪🇸 Ximena (西班牙语/多语言) - 兼容读中文",
+    "es-ES-ElviraNeural": "🇪🇸 Elvira (西班牙语) - 纯正通用西语",
+    "fr-FR-DeniseNeural": "🇫🇷 Denise (法语) - 优雅优雅女声",
+    "de-DE-KatjaNeural": "🇩🇪 Katja (德语) - 严谨清晰女声",
+    "it-IT-ElsaNeural": "🇮🇹 Elsa (意大利语) - 热情美声",
+
+    # 🇯🇵/🇰🇷/🌏 亚洲与东海多国音色
+    "ja-JP-NanamiNeural": "🇯🇵 Nanami (日语) - 动漫知性女声",
+    "ja-JP-KeitaNeural": "🇯🇵 Keita (日语) - 阳光男声",
+    "ko-KR-SunHiNeural": "🇰🇷 SunHi (韩语) - 韩剧温柔女声",
+    "th-TH-PremwadeeNeural": "🇹🇭 Premwadee (泰语) - 标准泰语女声",
+    "vi-VN-HoaiMyNeural": "🇻🇳 HoaiMy (越南语) - 亲切女声",
+    "ru-RU-SvetlanaNeural": "🇷🇺 Svetlana (俄语) - 标准俄语女声",
 }
 
 # 根据语种自动匹配最佳索引
 def get_default_voice_index(lang):
     lang_lower = str(lang).lower()
     if "en" in lang_lower:
-        return 2  # Jenny (美音)
+        return 5  # AvaMultilingualNeural
     elif "ja" in lang_lower:
-        return 9  # Nanami (日语)
+        return 17 # Nanami (日语)
     elif "ko" in lang_lower:
-        return 10 # SunHi (韩语)
+        return 19 # SunHi (韩语)
     elif "es" in lang_lower:
-        return 11 # Elvira (西语)
+        return 11 # XimenaMultilingual
     elif "hant" in lang_lower or "tw" in lang_lower:
-        return 6  # HsiaoChen (台湾腔)
+        return 4  # HsiaoChen (台湾腔)
     elif "hk" in lang_lower:
-        return 5  # HiuMaan (粤语)
+        return 3  # HiuMaan (粤语)
     return 0     # 默认中文 Xiaoxiao
 
 default_idx = get_default_voice_index(detected_lang_code)
 
 voice_option = st.selectbox(
-    "选择朗读音色（已根据检测语种为您智能推荐）：",
+    "选择朗读音色（国际通用多语种库）：",
     options=list(VOICE_MAP.keys()),
     index=default_idx,
     format_func=lambda x: VOICE_MAP[x],
 )
 
 # --------------------------------------------------
-# 6. 纯净语音与安全切片引擎
+# 6. 纯净语音与安全切片引擎 (防崩溃降级处理)
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -508,7 +542,8 @@ async def synth_single_chunk(chunk, voice):
             if item["type"] == "audio":
                 audio_data.extend(item["data"])
     except Exception:
-        fallback = "zh-CN-XiaoxiaoNeural" if "zh" in voice else "en-US-JennyNeural"
+        # 防崩溃降级：若所选音色不兼容当前字符，自动切至多语言全能音色
+        fallback = "en-US-AvaMultilingualNeural" if re.search(r'[\u4e00-\u9fa5]', chunk) else "zh-CN-XiaoxiaoNeural"
         communicate = edge_tts.Communicate(chunk, fallback)
         async for item in communicate.stream():
             if item["type"] == "audio":
@@ -524,6 +559,13 @@ async def generate_audio_bytes_safe(text, voice):
         res = await synth_single_chunk(chunk, voice)
         full_audio.extend(res)
         await asyncio.sleep(0.05)
+
+    if len(full_audio) == 0:
+        # 万无一失兜底：如果完全没有声音，强制使用 Xiaoxiao 合成
+        fallback_comm = edge_tts.Communicate(clean_text[:500], "zh-CN-XiaoxiaoNeural")
+        async for item in fallback_comm.stream():
+            if item["type"] == "audio":
+                full_audio.extend(item["data"])
 
     return bytes(full_audio)
 
