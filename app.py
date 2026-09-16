@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import io
 import json
 import os
@@ -138,7 +139,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手 (Global Ultimate Edition)")
 st.caption(
-    "全能旗舰版：全自动男女多角色对话 + 80Hz高通滤波 + 动态闪避混音(Audio Ducking) + 严选顶级音色"
+    "全能旗舰版：全自动男女多角色对话 + 80Hz高通滤波 + 动态闪避混音(Audio Ducking) + 锁屏 Media Session 响应"
 )
 
 # --------------------------------------------------
@@ -738,13 +739,11 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
     try:
         speech = AudioSegment.from_file(io.BytesIO(speech_bytes), format="mp3")
         
-        # 🎙️ [极致音品 1] 高通滤波 (High-pass Filter)：切除 80Hz 以下无用低频沉闷杂音
         try:
             speech = speech.high_pass_filter(80)
         except Exception:
             pass
 
-        # 🎙️ [极致音品 2] 人声电台级增益标准化 (+3.0 dB)
         speech = speech.apply_gain(+3.0)
         speech_duration = len(speech)
 
@@ -768,7 +767,6 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
 
         bgm = bgm[:speech_duration].fade_in(1000).fade_out(1000)
 
-        # 🎚️ [极致音品 3] 侧链平滑动态闪避算法 (Audio Ducking)
         bgm_base_gain = -38.0 + (volume_percent * 0.4)
         chunk_ms = 100
         ducked_bgm = AudioSegment.empty()
@@ -778,13 +776,11 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
             speech_chunk = speech[i:i+chunk_ms]
             bgm_chunk = bgm[i:i+chunk_ms]
 
-            # 检测说话对白声压 (以 -42.0 dBFS 为对白阀值)
             if speech_chunk.dbfs > -42.0:
-                target_duck = -5.0  # 对白期间 BGM 自动下沉 5dB 突出人声
+                target_duck = -5.0
             else:
-                target_duck = 0.0   # 对白停顿/留白时 BGM 缓缓浮现
+                target_duck = 0.0
 
-            # 平滑滤波避免跳变爆音
             current_duck = current_duck * 0.6 + target_duck * 0.4
             ducked_bgm += bgm_chunk + (bgm_base_gain + current_duck)
 
@@ -881,8 +877,58 @@ async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_fem
     return final_bytes
 
 # --------------------------------------------------
-# 8. 金句卡片生成引擎
+# 8. 金句卡片生成引擎与 Media Session 组件
 # --------------------------------------------------
+def render_custom_media_player(audio_bytes, title="完整文章听书 / 广播剧", artist="随身听书 & 思维助手"):
+    b64_audio = base64.b64encode(audio_bytes).decode('utf-8')
+    audio_data_url = f"data:audio/mp3;base64,{b64_audio}"
+    
+    current_chapter_title = title
+    if "book_chapters" in st.session_state and st.session_state.book_chapters:
+        idx = st.session_state.get("current_chapter_idx", 0)
+        if idx < len(st.session_state.book_chapters):
+            current_chapter_title = st.session_state.book_chapters[idx]['title']
+
+    html_code = f"""
+    <div style="width: 100%; text-align: center; margin: 5px 0;">
+        <audio id="custom-audio-player" controls autoplay style="width: 100%; max-width: 650px; height: 48px; border-radius: 8px;">
+            <source src="{audio_data_url}" type="audio/mp3">
+            您的浏览器不支持 HTML5 音频播放。
+        </audio>
+    </div>
+    <script>
+        const audio = document.getElementById('custom-audio-player');
+        
+        if ('mediaSession' in navigator) {{
+            navigator.mediaSession.metadata = new MediaMetadata({{
+                title: {json.dumps(current_chapter_title)},
+                artist: {json.dumps(artist)},
+                album: "AI 广播剧全能版",
+                artwork: [
+                    {{ src: 'https://cdn-icons-png.flaticon.com/512/3039/3039387.png', sizes: '512x512', type: 'image/png' }}
+                ]
+            }});
+
+            navigator.mediaSession.setActionHandler('play', () => audio.play());
+            navigator.mediaSession.setActionHandler('pause', () => audio.pause());
+            navigator.mediaSession.setActionHandler('seekbackward', (details) => {{
+                audio.currentTime = Math.max(audio.currentTime - (details.seekOffset || 10), 0);
+            }});
+            navigator.mediaSession.setActionHandler('seekforward', (details) => {{
+                audio.currentTime = Math.min(audio.currentTime + (details.seekOffset || 10), audio.duration);
+            }});
+        }}
+
+        audio.addEventListener('play', () => {{
+            if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+        }});
+        audio.addEventListener('pause', () => {{
+            if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+        }});
+    </script>
+    """
+    st.components.v1.html(html_code, height=65)
+
 @st.cache_resource
 def get_chinese_font(font_size=20):
     paths = [
@@ -1107,12 +1153,12 @@ with col2:
                     st.success("🎉 深度提炼完成！")
 
 # --------------------------------------------------
-# 11. 结果展示区
+# 11. 结果展示区 (集成 Media Session 支持)
 # --------------------------------------------------
 if st.session_state.full_audio_bytes:
     st.divider()
     st.subheader("🎧 完整文章听书 / 广播剧")
-    st.audio(st.session_state.full_audio_bytes, format="audio/mp3")
+    render_custom_media_player(st.session_state.full_audio_bytes, title="广播剧 / 听书", artist="随身听书 & 思维助手")
     st.download_button(
         "📥 下载完整 MP3",
         data=st.session_state.full_audio_bytes,
@@ -1191,7 +1237,7 @@ if st.session_state.local_summary:
         )
 
 if st.session_state.summary_audio_bytes:
-    st.audio(st.session_state.summary_audio_bytes, format="audio/mp3")
+    render_custom_media_player(st.session_state.summary_audio_bytes, title="速读总结音频", artist="随身听书 & 思维助手")
     st.download_button(
         "📥 下载总结速读 MP3",
         data=st.session_state.summary_audio_bytes,
