@@ -23,12 +23,11 @@ except ImportError:
     HAS_PYDUB = False
 
 # --------------------------------------------------
-# 0. MD5 磁盘缓存与 BGM 目录初始化
+# 0. MD5 磁盘缓存与 BGM 根目录初始化 (已适配手机直接根目录上传)
 # --------------------------------------------------
 CACHE_DIR = ".audio_cache"
-BGM_DIR = ".bgm_library"
+BGM_DIR = "."  # 👈 修改此处：指向根目录，方便手机直接上传 gentle_bgm.mp3
 os.makedirs(CACHE_DIR, exist_ok=True)
-os.makedirs(BGM_DIR, exist_ok=True)
 
 # 尝试导入 python-docx 与 ebooklib (扩展电子书支持)
 try:
@@ -690,7 +689,7 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem):
         return res_bytes
 
 def mix_bgm_with_audio(speech_bytes, volume_percent=15):
-    """广播剧级 BGM 混音器 (带可视化状态反馈)"""
+    """广播剧级 BGM 混音器 (已适配根目录 gentle_bgm.mp3 读取)"""
     if not HAS_PYDUB or not speech_bytes:
         return speech_bytes
 
@@ -698,15 +697,14 @@ def mix_bgm_with_audio(speech_bytes, volume_percent=15):
         speech = AudioSegment.from_file(io.BytesIO(speech_bytes), format="mp3")
         speech_duration = len(speech)
 
-        # 检查或生成优雅轻音乐 BGM
+        # 检查根目录下是否有用户上传的专属 gentle_bgm.mp3
         bgm_path = os.path.join(BGM_DIR, "gentle_bgm.mp3")
         if not os.path.exists(bgm_path):
-            # 默认生成更加柔和的双音和弦
+            # 若未上传，自动生成柔和的双音和弦作为默认 BGM
             from pydub.generators import Sine
             tone1 = Sine(220.0).to_audio_segment(duration=speech_duration + 2000).fade_in(1500).fade_out(1500)
             tone2 = Sine(277.18).to_audio_segment(duration=speech_duration + 2000).fade_in(1500).fade_out(1500)
             bgm = tone1.overlay(tone2) - 20
-            bgm.export(bgm_path, format="mp3")
         else:
             bgm = AudioSegment.from_file(bgm_path, format="mp3")
 
@@ -717,7 +715,6 @@ def mix_bgm_with_audio(speech_bytes, volume_percent=15):
 
         bgm = bgm[:speech_duration].fade_in(1500).fade_out(1500)
         
-        # 适当调高默认底音基准，使其更容易被听到
         volume_db = -22 + (volume_percent * 0.5)
         bgm = bgm + volume_db
 
@@ -725,11 +722,9 @@ def mix_bgm_with_audio(speech_bytes, volume_percent=15):
         output_io = io.BytesIO()
         mixed.export(output_io, format="mp3")
         
-        # 🟢 成功提示：如果看到这个提示，说明 FFmpeg 和混音 100% 成功生效了！
         st.toast("🎵 BGM 沉浸式背景音乐混音成功！", icon="🎧")
         return output_io.getvalue()
     except Exception as e:
-        # 🔴 错误明文抛出：如果 FFmpeg 没装好，页面会直接显示原因，不再静默失败
         st.error(f"❌ BGM 混音异常（FFmpeg/pydub 环境未就绪）: {e}")
         return speech_bytes
 
