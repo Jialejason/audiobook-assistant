@@ -1,11 +1,10 @@
 streamlit
 edge-tts
+youtube-transcript-api
+yt-dlp
 beautifulsoup4
 requests
 Pillow
 pypdf
 jieba
-youtube-transcript-api
 trafilatura
-lxml
-fonttools
