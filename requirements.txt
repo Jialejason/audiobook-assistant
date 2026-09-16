@@ -1,6 +1,6 @@
 edge-tts
 pydub
-pyaudioop
+audioop-lts
 imageio-ffmpeg
 streamlit
 jieba
