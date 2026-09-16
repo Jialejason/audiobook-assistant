@@ -22,11 +22,13 @@ from pypdf import PdfReader
 # 0. 环境与依赖严格诊断 (包含原生 FFmpeg 路径补全与 Python 3.14 audioop 适配)
 # --------------------------------------------------
 # 💡 关键修复 1：兼容 Python 3.13+ / 3.14 移除的 audioop 内置库
+import sys
+
 try:
     import audioop
 except ImportError:
     try:
-        import pyaudioop as audioop
+        import audioop_lts as audioop
         sys.modules["audioop"] = audioop
     except ImportError:
         pass
