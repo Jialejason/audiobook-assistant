@@ -690,7 +690,7 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem):
         return res_bytes
 
 def mix_bgm_with_audio(speech_bytes, volume_percent=15):
-    """广播剧级 BGM 混音器 (使 TTS 音频具备影音听书质感)"""
+    """广播剧级 BGM 混音器 (带可视化状态反馈)"""
     if not HAS_PYDUB or not speech_bytes:
         return speech_bytes
 
@@ -701,11 +701,11 @@ def mix_bgm_with_audio(speech_bytes, volume_percent=15):
         # 检查或生成优雅轻音乐 BGM
         bgm_path = os.path.join(BGM_DIR, "gentle_bgm.mp3")
         if not os.path.exists(bgm_path):
-            # 创建一段柔和的琴音/舒缓音频作为默认 BGM
+            # 默认生成更加柔和的双音和弦
             from pydub.generators import Sine
-            tone1 = Sine(261.63).to_audio_segment(duration=speech_duration + 2000).fade_in(1000).fade_out(1000)
-            tone2 = Sine(329.63).to_audio_segment(duration=speech_duration + 2000).fade_in(1000).fade_out(1000)
-            bgm = tone1.overlay(tone2) - 25
+            tone1 = Sine(220.0).to_audio_segment(duration=speech_duration + 2000).fade_in(1500).fade_out(1500)
+            tone2 = Sine(277.18).to_audio_segment(duration=speech_duration + 2000).fade_in(1500).fade_out(1500)
+            bgm = tone1.overlay(tone2) - 20
             bgm.export(bgm_path, format="mp3")
         else:
             bgm = AudioSegment.from_file(bgm_path, format="mp3")
@@ -716,15 +716,21 @@ def mix_bgm_with_audio(speech_bytes, volume_percent=15):
             bgm = bgm * loops_needed
 
         bgm = bgm[:speech_duration].fade_in(1500).fade_out(1500)
-        # 根据百分比降低 BGM 音量，突出人声
-        volume_db = -30 + (volume_percent * 0.5)
+        
+        # 适当调高默认底音基准，使其更容易被听到
+        volume_db = -22 + (volume_percent * 0.5)
         bgm = bgm + volume_db
 
         mixed = speech.overlay(bgm)
         output_io = io.BytesIO()
         mixed.export(output_io, format="mp3")
+        
+        # 🟢 成功提示：如果看到这个提示，说明 FFmpeg 和混音 100% 成功生效了！
+        st.toast("🎵 BGM 沉浸式背景音乐混音成功！", icon="🎧")
         return output_io.getvalue()
-    except Exception:
+    except Exception as e:
+        # 🔴 错误明文抛出：如果 FFmpeg 没装好，页面会直接显示原因，不再静默失败
+        st.error(f"❌ BGM 混音异常（FFmpeg/pydub 环境未就绪）: {e}")
         return speech_bytes
 
 async def generate_audio_bytes_parallel(text, voice, rate_str="+0%", max_concurrency=10, apply_bgm=False, volume_pct=15):
