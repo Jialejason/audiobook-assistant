@@ -21,7 +21,6 @@ from pypdf import PdfReader
 # --------------------------------------------------
 # 0. 环境与依赖诊断 (自动激活原生 FFmpeg / imageio-ffmpeg & Python 3.14 audioop 适配)
 # --------------------------------------------------
-# 💡 兼容 Python 3.13+ / 3.14 移除的 audioop 内置库
 try:
     import audioop
 except ImportError:
@@ -31,7 +30,6 @@ except ImportError:
     except ImportError:
         pass
 
-# 💡 补全 Linux 系统二进制路径到 PATH 环境变量
 for path_dir in ["/usr/bin", "/usr/local/bin", "/bin"]:
     if path_dir not in os.environ.get("PATH", "").split(os.path.pathsep):
         os.environ["PATH"] = path_dir + os.path.pathsep + os.environ.get("PATH", "")
@@ -47,7 +45,6 @@ try:
 except ImportError as e:
     FFMPEG_ERROR_MSG = f"pydub 导入失败: {e}"
 
-# 🔍【核心修复】FFmpeg 自动智能探测与 Pydub 绑定逻辑
 ffmpeg_sys_path = shutil.which("ffmpeg")
 if ffmpeg_sys_path:
     FFMPEG_READY = True
@@ -77,7 +74,6 @@ CACHE_DIR = ".audio_cache"
 BGM_DIR = "."
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# 尝试导入其他扩展库
 try:
     import docx
     HAS_DOCX = True
@@ -151,7 +147,6 @@ st.caption(
 with st.sidebar:
     st.header("⚙️ 引擎与影音设置")
     
-    # 🔍 状态诊断面板
     if HAS_PYDUB and FFMPEG_READY:
         st.success(f"✅ BGM / 多角色混音引擎就绪\n({FFMPEG_SOURCE})")
     else:
@@ -160,7 +155,6 @@ with st.sidebar:
 
     st.divider()
     
-    # 🎭 广播剧多角色模式设置
     enable_multi_role = st.checkbox(
         "🎭 开启全自动 AI 广播剧 (男女多角色对话模式)",
         value=True,
@@ -169,7 +163,6 @@ with st.sidebar:
     
     st.divider()
 
-    # 🎵 背景音乐管理与自由切换
     enable_bgm = st.checkbox(
         "🎵 开启 BGM 沉浸式背景音乐混音",
         value=False,
@@ -186,7 +179,8 @@ with st.sidebar:
         help="你可以从下拉菜单切换已上传的不同 MP3 背景音乐"
     )
     
-    bgm_volume = st.slider("🎚️ BGM 音量比例:", min_value=5, max_value=50, value=30, format="%d%%")
+    # 💡 音量默认值调小至 12%，保持衬托效果
+    bgm_volume = st.slider("🎚️ BGM 音量比例:", min_value=5, max_value=50, value=12, format="%d%%", help="建议设置在 10%~20% 之间，衬托背景且不盖过人声")
     
     with st.expander("📤 上传我的背景音乐 (.mp3)", expanded=False):
         uploaded_bgm = st.file_uploader("选择手机里的 MP3 文件上传：", type=["mp3"], key="bgm_uploader")
@@ -661,7 +655,7 @@ if len(raw_text) > 8000:
     active_process_text = auto_chapters[selected_ch_idx]["content"]
 
 # --------------------------------------------------
-# 7. TTS 合成 + 动态 BGM 混音
+# 7. TTS 合成 + 动态 BGM 混音 (已优化音量算法与人声提亮)
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -737,13 +731,16 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem=None):
     else:
         return await do_synth()
 
-def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=30):
+def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=12):
     if not HAS_PYDUB or not FFMPEG_READY or not speech_bytes:
         st.warning("⚠️ BGM 混音跳过：pydub 库未就绪或未检测到 FFmpeg。")
         return speech_bytes
 
     try:
         speech = AudioSegment.from_file(io.BytesIO(speech_bytes), format="mp3")
+        
+        # 🎙️ 步骤1：增益人声，使其达到电台标准清晰音量
+        speech = speech.apply_gain(+3.0)
         speech_duration = len(speech)
 
         is_custom_mp3 = bgm_choice_name != "🎹 系统默认柔和和弦"
@@ -753,9 +750,10 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=30):
             bgm = AudioSegment.from_file(bgm_path, format="mp3")
         else:
             from pydub.generators import Sine
-            tone1 = Sine(261.63).to_audio_segment(duration=speech_duration + 2000)
-            tone2 = Sine(329.63).to_audio_segment(duration=speech_duration + 2000)
-            tone3 = Sine(392.00).to_audio_segment(duration=speech_duration + 2000)
+            # 🎵 步骤2：对系统默认和弦做 -35dB 大幅衰减，消除蜂鸣噪音
+            tone1 = Sine(261.63).to_audio_segment(duration=speech_duration + 2000) - 35
+            tone2 = Sine(329.63).to_audio_segment(duration=speech_duration + 2000) - 35
+            tone3 = Sine(392.00).to_audio_segment(duration=speech_duration + 2000) - 35
             bgm = tone1.overlay(tone2).overlay(tone3)
 
         bgm = bgm.set_frame_rate(speech.frame_rate).set_channels(speech.channels)
@@ -764,9 +762,11 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=30):
             loops_needed = (speech_duration // len(bgm)) + 1
             bgm = bgm * loops_needed
 
-        bgm = bgm[:speech_duration].fade_in(800).fade_out(800)
-        volume_db = -25 + (volume_percent * 0.6)
-        bgm = bgm + volume_db
+        bgm = bgm[:speech_duration].fade_in(1000).fade_out(1000)
+
+        # 🎚️ 步骤3：精准衰减 BGM 音量，保证比人声低 20dB~35dB
+        bgm_attenuation = -38.0 + (volume_percent * 0.4)
+        bgm = bgm + bgm_attenuation
 
         mixed = speech.overlay(bgm)
         output_io = io.BytesIO()
@@ -778,7 +778,7 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=30):
         st.error(f"❌ 混音崩溃报错详情: {e}")
         return speech_bytes
 
-async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_female, rate_str, use_multi_role=True, max_concurrency=10, apply_bgm=False, bgm_name="🎹 系统默认柔和和弦", vol_pct=30):
+async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_female, rate_str, use_multi_role=True, max_concurrency=10, apply_bgm=False, bgm_name="🎹 系统默认柔和和弦", vol_pct=12):
     clean_text = clean_markdown_for_speech(text)
     if not clean_text.strip():
         return b""
