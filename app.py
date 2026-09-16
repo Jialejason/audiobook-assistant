@@ -16,10 +16,11 @@ from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
 # --------------------------------------------------
-# 0. 环境与依赖严格诊断 (检查 FFmpeg 是否真正安装成功)
+# 0. 环境与依赖严格诊断 (双重保险：系统 FFmpeg + Python 自动解压接管)
 # --------------------------------------------------
 HAS_PYDUB = False
 FFMPEG_READY = False
+FFMPEG_SOURCE = "未就绪"
 
 try:
     from pydub import AudioSegment
@@ -28,11 +29,23 @@ except ImportError:
     pass
 
 if HAS_PYDUB:
+    # 优先方案 1：尝试通过 imageio_ffmpeg 自动绑定 Python 内置 FFmpeg 二进制
     try:
-        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        AudioSegment.converter = ffmpeg_exe
+        AudioSegment.ffprobe = ffmpeg_exe
         FFMPEG_READY = True
+        FFMPEG_SOURCE = "Python 自动解压引擎 (imageio-ffmpeg)"
     except Exception:
-        FFMPEG_READY = False
+        # 备选方案 2：检测 Linux 系统原生环境变量中的 ffmpeg
+        try:
+            subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            FFMPEG_READY = True
+            FFMPEG_SOURCE = "Linux 系统原生 (packages.txt)"
+        except Exception:
+            FFMPEG_READY = False
+            FFMPEG_SOURCE = "未检测到 FFmpeg"
 
 CACHE_DIR = ".audio_cache"
 BGM_DIR = "."
@@ -112,12 +125,12 @@ st.caption(
 with st.sidebar:
     st.header("⚙️ 引擎与影音设置")
     
-    # 🔍 状态诊断面板
+    # 🔍 状态诊断面板 (显示当前 FFmpeg 的绑定状态)
     if HAS_PYDUB and FFMPEG_READY:
-        st.success("✅ BGM / 多角色混音引擎就绪 (FFmpeg 正常)")
+        st.success(f"✅ BGM / 多角色混音引擎就绪\n({FFMPEG_SOURCE})")
     else:
-        st.error("❌ BGM 混音受阻：云端未检测到 FFmpeg！")
-        st.info("💡 解决办法：请检查 packages.txt 文件里是否单独一行写了 `ffmpeg` 并在后台 Reboot App。")
+        st.error("❌ BGM 混音受阻：未检测到 FFmpeg！")
+        st.info("💡 解决办法：请在 requirements.txt 中添加一行 `imageio-ffmpeg`，系统将自动绑定启动！")
 
     st.divider()
     
@@ -629,7 +642,7 @@ if len(raw_text) > 8000:
     active_process_text = auto_chapters[selected_ch_idx]["content"]
 
 # --------------------------------------------------
-# 7. TTS 合成 + MD5 缓存 + 多角色 + 动态 BGM 混音
+# 7. TTS 合成 + MD5 缓存 + 多角色并发合成 + 动态 BGM 混音
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -752,15 +765,33 @@ async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_fem
     if not clean_text.strip():
         return b""
 
+    sem = asyncio.Semaphore(max_concurrency)
+
     if use_multi_role:
         script_segments = parse_multi_role_script(clean_text)
-        progress_bar = st.progress(0, text=f"🎭 正在合成多角色广播剧音频 (共 {len(script_segments)} 段对白/旁白)...")
+        progress_bar = st.progress(0, text=f"🎭 正在并发合成多角色广播剧 (共 {len(script_segments)} 段对白/旁白)...")
         role_voice_map = {"NARRATOR": v_narrator, "MALE": v_male, "FEMALE": v_female}
-        audio_segments_pydub = []
-
-        for idx, (role, seg_text) in enumerate(script_segments):
+        
+        # 并发极速加速：同时合成多段对白
+        async def synth_segment_task(idx, role, seg_text):
             v = role_voice_map.get(role, v_narrator)
-            seg_bytes = await synth_single_chunk_cached(seg_text, v, rate_str)
+            seg_bytes = await synth_single_chunk_cached(seg_text, v, rate_str, sem)
+            return idx, role, seg_bytes
+
+        tasks = [synth_segment_task(i, r, t) for i, (r, t) in enumerate(script_segments)]
+        results = [None] * len(script_segments)
+        completed = 0
+
+        for f in asyncio.as_completed(tasks):
+            idx, role, seg_bytes = await f
+            results[idx] = (role, seg_bytes)
+            completed += 1
+            progress_bar.progress(completed / len(script_segments), text=f"🎭 广播剧合成进度 ({completed}/{len(script_segments)} 段)...")
+
+        progress_bar.empty()
+        
+        audio_segments_pydub = []
+        for role, seg_bytes in results:
             if seg_bytes:
                 if HAS_PYDUB and FFMPEG_READY:
                     audio_seg = AudioSegment.from_file(io.BytesIO(seg_bytes), format="mp3")
@@ -768,9 +799,7 @@ async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_fem
                     audio_segments_pydub.append(audio_seg + pause)
                 else:
                     audio_segments_pydub.append(seg_bytes)
-            progress_bar.progress((idx + 1) / len(script_segments), text=f"🎭 已完成第 {idx+1}/{len(script_segments)} 段 [{role}] 合成...")
 
-        progress_bar.empty()
         if not audio_segments_pydub:
             return b""
 
@@ -785,7 +814,6 @@ async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_fem
             final_bytes = b"".join([b for b in audio_segments_pydub if isinstance(b, bytes)])
     else:
         chunks = split_text_chunks_safe(clean_text)
-        sem = asyncio.Semaphore(max_concurrency)
         progress_bar = st.progress(0, text=f"⚡ 正在启动 {max_concurrency} 线程并发合成...")
         
         async def worker(idx, chunk):
