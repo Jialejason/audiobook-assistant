@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import os
 import re
 import subprocess
@@ -42,7 +43,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手 (Global Ultimate Edition)")
 st.caption(
-    "全球国际化通用版：300+ 全球微软 AI 动态音色库 + YouTube 双核字幕抓取 + 智能听书提炼"
+    "全球国际化通用版：300+ 中英双语全球 AI 动态音色库 + YouTube 双核纯净字幕抓取 + 智能听书提炼"
 )
 
 # --------------------------------------------------
@@ -62,8 +63,36 @@ with st.sidebar:
     )
 
 # --------------------------------------------------
-# 3. 高级网页与 YouTube 自动解析函数 (双核抓取)
+# 3. 高级网页与 YouTube 自动解析函数 (含 JSON 纯净字幕清洗)
 # --------------------------------------------------
+def parse_youtube_subtitle_text(raw_str):
+    """智能解析 JSON3 / VTT / XML 格式的原始字幕流，解析并提炼纯净文字"""
+    # 1. 优先解析 YouTube json3 结构（彻底排除 {"wireMagic": ...} 干扰）
+    try:
+        sub_data = json.loads(raw_str)
+        if "events" in sub_data:
+            lines = []
+            for event in sub_data["events"]:
+                if "segs" in event:
+                    seg_text = "".join([s.get("utf8", "") for s in event["segs"]])
+                    seg_text = seg_text.replace("\n", " ").strip()
+                    if seg_text:
+                        lines.append(seg_text)
+            if lines:
+                return " ".join(lines)
+    except Exception:
+        pass
+
+    # 2. 兜底解析 VTT / HTML 标签文本
+    clean_text = re.sub(r'<[^>]+>', '', raw_str)
+    clean_text = re.sub(r'\d{2}:\d{2}:\d{2}\.\d{3}.*?\n', '', clean_text)
+    lines = [
+        line.strip() 
+        for line in clean_text.split('\n') 
+        if line.strip() and not line.strip().isdigit() and not line.startswith('{')
+    ]
+    return " ".join(lines[:500])
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_text_from_url(url):
     if HAS_TRAFILATURA:
@@ -141,8 +170,8 @@ def extract_youtube_id(url):
 
 @st.cache_data(show_spinner=False, ttl=1800)
 def fetch_youtube_transcript_backend(video_id, full_url=""):
-    """Python 后端双核 YouTube 字幕提取引擎 (API + yt-dlp)"""
-    preferred_langs = ['en', 'zh-Hans', 'zh-Hant', 'zh', 'ja', 'es', 'de', 'fr', 'ko', 'vi', 'th', 'ru']
+    """Python 后端双核 YouTube 字幕提取引擎 (API + yt-dlp 纯净解包)"""
+    preferred_langs = ['zh-Hans', 'zh-Hant', 'zh', 'en', 'ja', 'es', 'de', 'fr', 'ko', 'vi', 'th', 'ru']
 
     # 第一核：YouTubeTranscriptApi
     if HAS_YOUTUBE_API:
@@ -158,7 +187,7 @@ def fetch_youtube_transcript_backend(video_id, full_url=""):
             except Exception:
                 pass
 
-    # 第二核：yt-dlp 强力破解提取
+    # 第二核：yt-dlp 强力破解提取 + 自动 json3 纯净解包
     if HAS_YTDLP and full_url:
         try:
             ydl_opts = {
@@ -179,12 +208,9 @@ def fetch_youtube_transcript_backend(video_id, full_url=""):
                     if json_sub:
                         res = requests.get(json_sub[0]['url'], timeout=10)
                         if res.status_code == 200:
-                            clean_text = re.sub(r'<[^>]+>', '', res.text)
-                            clean_text = re.sub(r'\d{2}:\d{2}:\d{2}\.\d{3}.*?\n', '', clean_text)
-                            lines = [line.strip() for line in clean_text.split('\n') if line.strip() and not line.strip().isdigit()]
-                            full_text = " ".join(lines[:500])
-                            if len(full_text) > 30:
-                                return True, full_text, lang_key
+                            clean_text = parse_youtube_subtitle_text(res.text)
+                            if len(clean_text) > 30:
+                                return True, clean_text, lang_key
         except Exception:
             pass
 
@@ -440,19 +466,54 @@ else:
         detected_lang_code = detect_language(raw_text)
 
 # --------------------------------------------------
-# 5. 【方案 B】微软 300+ 全球动态 AI 音色引擎 + 自动配对
+# 5. 【中英双语版】微软 300+ 全球动态 AI 音色库映射
 # --------------------------------------------------
+LOCALE_LANG_MAP = {
+    'zh-CN': ('中文普通话', 'Mandarin'),
+    'zh-HK': ('粤语/香港', 'Cantonese'),
+    'zh-TW': ('台湾中文', 'Taiwanese'),
+    'en-US': ('美式英语', 'US English'),
+    'en-GB': ('英式英语', 'UK English'),
+    'en-AU': ('澳洲英语', 'AU English'),
+    'en-IN': ('印度英语', 'Indian English'),
+    'ja-JP': ('日语', 'Japanese'),
+    'ko-KR': ('韩语', 'Korean'),
+    'vi-VN': ('越南语', 'Vietnamese'),
+    'th-TH': ('泰语', 'Thai'),
+    'ms-MY': ('马来语', 'Malay'),
+    'id-ID': ('印尼语', 'Indonesian'),
+    'jv-ID': ('爪哇语', 'Javanese'),
+    'su-ID': ('巽他语', 'Sundanese'),
+    'es-ES': ('西班牙语', 'Spanish'),
+    'es-MX': ('墨西哥西语', 'Mexican Spanish'),
+    'fr-FR': ('法语', 'French'),
+    'de-DE': ('德语', 'German'),
+    'it-IT': ('意大利语', 'Italian'),
+    'ru-RU': ('俄语', 'Russian'),
+    'ar-SA': ('阿拉伯语', 'Arabic'),
+    'hi-IN': ('印地语', 'Hindi'),
+    'kn-IN': ('卡纳达语', 'Kannada'),
+    'ta-IN': ('泰米尔语', 'Tamil'),
+    'te-IN': ('泰卢固语', 'Telugu'),
+    'pt-BR': ('巴西葡语', 'Portuguese'),
+    'nl-NL': ('荷兰语', 'Dutch'),
+    'tr-TR': ('土耳其语', 'Turkish'),
+    'pl-PL': ('波兰语', 'Polish'),
+    'uk-UA': ('乌克兰语', 'Ukrainian'),
+}
+
 LOCALE_FLAGS = {
     'zh-CN': '🇨🇳', 'zh-HK': '🇭🇰', 'zh-TW': '🇹🇼', 'en-US': '🇺🇸', 'en-GB': '🇬🇧',
     'en-AU': '🇦🇺', 'en-CA': '🇨🇦', 'en-IN': '🇮🇳', 'ja-JP': '🇯🇵', 'ko-KR': '🇰🇷',
     'es-ES': '🇪🇸', 'es-MX': '🇲🇽', 'fr-FR': '🇫🇷', 'de-DE': '🇩🇪', 'it-IT': '🇮🇹',
     'ru-RU': '🇷🇺', 'vi-VN': '🇻🇳', 'th-TH': '🇹🇭', 'ms-MY': '🇲🇾', 'id-ID': '🇮🇩',
-    'ar-SA': '🇸🇦', 'hi-IN': '🇮🇳', 'pt-BR': '🇧🇷', 'nl-NL': '🇳🇱'
+    'ar-SA': '🇸🇦', 'hi-IN': '🇮🇳', 'pt-BR': '🇧🇷', 'nl-NL': '🇳🇱', 'jv-ID': '🇮🇩',
+    'kn-IN': '🇮🇳', 'tr-TR': '🇹🇷', 'pl-PL': '🇵🇱', 'uk-UA': '🇺🇦'
 }
 
 @st.cache_resource
 def fetch_all_global_voices():
-    """实时向微软服务器同步全球 300+ 种神经网络音色"""
+    """实时向微软服务器同步全球 300+ 种神经网络音色（中英双语可读格式）"""
     try:
         voices = run_async_safe(edge_tts.list_voices())
         voice_dict = {}
@@ -461,33 +522,36 @@ def fetch_all_global_voices():
             locale = v.get("Locale", "")
             gender = "👩" if v.get("Gender") == "Female" else "👨"
             
-            base_loc = "-".join(locale.split("-")[:2]) if "-" in locale else locale
-            flag = LOCALE_FLAGS.get(base_loc, "🌍")
+            flag = LOCALE_FLAGS.get(locale, "🌍")
+            
+            if locale in LOCALE_LANG_MAP:
+                zh_name, en_name = LOCALE_LANG_MAP[locale]
+                lang_str = f"{zh_name} | {en_name}"
+            else:
+                lang_str = locale
             
             name_parts = short_name.split("-")
-            voice_name = name_parts[-1] if len(name_parts) >= 3 else short_name
+            voice_name = name_parts[-1].replace("Neural", "") if len(name_parts) >= 3 else short_name
             
-            display = f"{flag} [{locale}] {voice_name} ({gender})"
+            display = f"{flag} [{lang_str}] {voice_name} ({gender})"
             voice_dict[short_name] = display
         return voice_dict
     except Exception:
-        # 兜底精选库
         return {
-            "zh-CN-XiaoxiaoNeural": "🇨🇳 [zh-CN] Xiaoxiao (👩 知性女声)",
-            "zh-CN-YunxiNeural": "🎙️ [zh-CN] Yunxi (👨 磁性男声)",
-            "en-US-AvaMultilingualNeural": "🌐 [en-US] AvaMultilingual (👩 全能多语言)",
-            "en-US-JennyNeural": "🇺🇸 [en-US] Jenny (👩 经典美音)",
-            "en-GB-SoniaNeural": "🇬🇧 [en-GB] Sonia (👩 优雅英音)",
-            "ja-JP-NanamiNeural": "🇯🇵 [ja-JP] Nanami (👩 动漫日文)",
-            "ko-KR-SunHiNeural": "🇰🇷 [ko-KR] SunHi (👩 温柔韩文)",
-            "vi-VN-HoaiMyNeural": "🇻🇳 [vi-VN] HoaiMy (👩 标准越南文)",
-            "es-ES-XimenaMultilingualNeural": "🇪🇸 [es-ES] XimenaMultilingual (👩 多语言西文)",
+            "zh-CN-XiaoxiaoNeural": "🇨🇳 [中文普通话 | Mandarin] Xiaoxiao (👩)",
+            "zh-CN-YunxiNeural": "🎙️ [中文普通话 | Mandarin] Yunxi (👨)",
+            "en-US-AvaMultilingualNeural": "🌐 [美式英语 | US English] AvaMultilingual (👩)",
+            "en-US-JennyNeural": "🇺🇸 [美式英语 | US English] Jenny (👩)",
+            "en-GB-SoniaNeural": "🇬🇧 [英式英语 | UK English] Sonia (👩)",
+            "ja-JP-NanamiNeural": "🇯🇵 [日语 | Japanese] Nanami (👩)",
+            "ko-KR-SunHiNeural": "🇰🇷 [韩语 | Korean] SunHi (👩)",
+            "vi-VN-HoaiMyNeural": "🇻🇳 [越南语 | Vietnamese] HoaiMy (👩)",
+            "es-ES-XimenaMultilingualNeural": "🇪🇸 [西班牙语 | Spanish] XimenaMultilingual (👩)",
         }
 
 GLOBAL_VOICES = fetch_all_global_voices()
 voice_keys = list(GLOBAL_VOICES.keys())
 
-# 计算匹配最佳默认音色索引
 def calc_default_voice_index(lang_code, keys):
     lang_code_low = lang_code.lower()
     if lang_code_low == 'zh':
@@ -502,7 +566,7 @@ def calc_default_voice_index(lang_code, keys):
 default_idx = calc_default_voice_index(detected_lang_code, voice_keys)
 
 voice_option = st.selectbox(
-    "选择朗读音色（已自动推荐最佳音色，也可手动搜索全球 300+ 种音色）：",
+    "选择朗读音色（已自动推荐最佳音色，也可手动搜索全球 300+ 种中英双语音色）：",
     options=voice_keys,
     index=default_idx,
     format_func=lambda x: GLOBAL_VOICES[x],
@@ -570,7 +634,6 @@ async def synth_single_chunk(chunk, voice):
     except Exception:
         pass
     
-    # 防崩溃降级：若所选音色不兼容当前文本，自动切至多语言全能音色
     if len(audio_data) == 0:
         fallback_voice = "zh-CN-XiaoxiaoNeural" if re.search(r'[\u4e00-\u9fa5]', chunk) else "en-US-AvaMultilingualNeural"
         try:
@@ -594,7 +657,6 @@ async def generate_audio_bytes_safe(text, voice):
         await asyncio.sleep(0.05)
 
     if len(full_audio) == 0:
-        # 万无一失兜底：如果完全没有声音，强制使用 Xiaoxiao 合成
         fallback_comm = edge_tts.Communicate(clean_text[:500], "zh-CN-XiaoxiaoNeural")
         async for item in fallback_comm.stream():
             if item["type"] == "audio":
