@@ -15,21 +15,31 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
-# 尝试导入 pydub 进行影音级 BGM 混音处理
+# --------------------------------------------------
+# 0. 环境与依赖严格诊断 (检查 FFmpeg 是否真正安装成功)
+# --------------------------------------------------
+HAS_PYDUB = False
+FFMPEG_READY = False
+
 try:
     from pydub import AudioSegment
     HAS_PYDUB = True
 except ImportError:
-    HAS_PYDUB = False
+    pass
 
-# --------------------------------------------------
-# 0. MD5 磁盘缓存与 BGM 根目录初始化
-# --------------------------------------------------
+if HAS_PYDUB:
+    try:
+        # 测试系统环境变量中是否存在 ffmpeg
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        FFMPEG_READY = True
+    except Exception:
+        FFMPEG_READY = False
+
 CACHE_DIR = ".audio_cache"
-BGM_DIR = "."  # 指向根目录，方便手机直接上传 gentle_bgm.mp3
+BGM_DIR = "."
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# 尝试导入 python-docx 与 ebooklib (扩展电子书支持)
+# 尝试导入其他扩展库
 try:
     import docx
     HAS_DOCX = True
@@ -43,7 +53,6 @@ try:
 except ImportError:
     HAS_EPUB = False
 
-# 尝试导入 youtube_transcript_api 与 yt_dlp
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
     HAS_YOUTUBE_API = True
@@ -56,7 +65,6 @@ try:
 except ImportError:
     HAS_YTDLP = False
 
-# 尝试导入 trafilatura（网页正文智能提取库）
 try:
     import trafilatura
     HAS_TRAFILATURA = True
@@ -76,19 +84,26 @@ st.caption(
 )
 
 # --------------------------------------------------
-# 2. 侧边栏：Ollama (Qwen) & 影音 BGM 引擎设置
+# 2. 侧边栏：Ollama & 影音 BGM 引擎设置 (含诊断提示)
 # --------------------------------------------------
 with st.sidebar:
     st.header("⚙️ 引擎与影音设置")
+    
+    # 🔍 状态诊断面板
+    if HAS_PYDUB and FFMPEG_READY:
+        st.success("✅ BGM 混音引擎就绪 (FFmpeg 正常)")
+    else:
+        st.error("❌ BGM 混音受阻：云端未检测到 FFmpeg！")
+        st.info("💡 解决办法：请检查仓库中的 packages.txt 文件里是否单独一行写了 `ffmpeg` 并在后台 Reboot App。")
+
     use_ollama = st.checkbox(
         "🧠 启用 Ollama (Qwen) 本地大模型",
         value=False,
-        help="未安装 Ollama 请勿勾选。换新电脑安装 Ollama 后勾选即可开启离线大模型提炼；若连接失败会自动无缝切回自适应算法。",
+        help="未安装 Ollama 请勿勾选。",
     )
     ollama_model = st.text_input(
         "Ollama 模型名称:",
         value="qwen2.5:1.5b",
-        help="需先在终端运行过: ollama run qwen2.5:1.5b",
     )
     st.divider()
     
@@ -96,9 +111,9 @@ with st.sidebar:
     enable_bgm = st.checkbox(
         "🎵 开启 BGM 沉浸式背景音乐混音",
         value=False,
-        help="开启后将为你生成的听书音频自动叠加轻柔背景音乐，打造广播剧级的有声体验！"
+        help="开启后将为你生成的听书音频自动叠加轻柔背景音乐！"
     )
-    bgm_volume = st.slider("🎚️ BGM 音量比例:", min_value=5, max_value=40, value=15, format="%d%%")
+    bgm_volume = st.slider("🎚️ BGM 音量比例:", min_value=5, max_value=50, value=30, format="%d%%")
     
     st.divider()
     concurrency_limit = st.slider(
@@ -106,7 +121,6 @@ with st.sidebar:
         min_value=4,
         max_value=16,
         value=10,
-        help="推荐 10 线程并发合成，速度提升 5-8 倍"
     )
 
 # --------------------------------------------------
@@ -115,21 +129,16 @@ with st.sidebar:
 def clean_extracted_text(text):
     if not text:
         return ""
-    
     text = text.replace('﹗', '！').replace('﹖', '？').replace('......', '……')
-
     lines = text.split("\n")
     cleaned_lines = []
-    
     noise_keywords = [
         "家庭发展基金", "家庭發展基金", "ICAC", "廉政公署", "署政", 
         "编者的话", "編者的話", "智多多大道理小故事", "智多多", 
         "製作", "制作", "贊助", "赞助", "版权所有", "版權所有",
         "All rights reserved", "ISBN", "关注微信公众号", "点击上方蓝字"
     ]
-    
     noise_symbols = {"M", "W", "NNN", "B", "FES", "0", "00", "000"}
-
     page_patterns = [
         r'^\s*\d+(\s+\d+)*\s*$',
         r'^\s*-\s*\d+\s*-\s*$',
@@ -138,12 +147,10 @@ def clean_extracted_text(text):
         r'^[A-Z0-9_\-]+/\d+.*$',
         r'^\s*\d+\s*/\s*\d+\s*$',
     ]
-
     for line in lines:
         l = line.strip()
         if not l or l in noise_symbols:
             continue
-            
         is_noise = False
         for pattern in page_patterns:
             if re.match(pattern, l, re.IGNORECASE):
@@ -151,12 +158,9 @@ def clean_extracted_text(text):
                 break
         if is_noise:
             continue
-            
         if any(kw in l for kw in noise_keywords):
             continue
-            
         cleaned_lines.append(l)
-
     full_text = "\n".join(cleaned_lines)
     full_text = re.sub(r'([^。！？!？…\n])\n([^。！？!？…\n])', r'\1\2', full_text)
     return full_text.strip()
@@ -193,7 +197,6 @@ def parse_youtube_subtitle_text(raw_str):
                 return " ".join(lines)
     except Exception:
         pass
-
     clean_text = re.sub(r'<[^>]+>', '', raw_str)
     clean_text = re.sub(r'\d{2}:\d{2}:\d{2}\.\d{3}.*?\n', '', clean_text)
     lines = [
@@ -214,7 +217,6 @@ def fetch_text_from_url(url):
                     return result.strip()
         except Exception:
             pass
-
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -223,16 +225,12 @@ def fetch_text_from_url(url):
         response = requests.get(url, headers=headers, timeout=12)
         response.encoding = response.apparent_encoding
         soup = BeautifulSoup(response.text, "html.parser")
-
         for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
             element.extract()
-
         paragraphs = soup.find_all(["p", "article", "h1", "h2", "h3", "section"])
         extracted_text = "\n".join([p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 10])
-        
         if len(extracted_text) < 50:
             extracted_text = soup.get_text().strip()
-
         extracted_text = re.sub(r"\n\s*\n", "\n", extracted_text)
         return extracted_text
     except Exception as e:
@@ -244,28 +242,21 @@ def parse_book_catalog(catalog_url):
         res = requests.get(catalog_url, headers=headers, timeout=12)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
-        
         parsed_url = urlparse(catalog_url)
         base_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
-        
         chapters = []
         for a in soup.find_all("a", href=True):
             text = a.get_text().strip()
             href = a['href'].strip()
-            
             if not href or href.startswith("javascript:") or href == "#" or "openapp" in href.lower():
                 continue
-
             if text and (("第" in text and "章" in text) or ("集" in text) or len(text) < 30):
                 if any(kw in text for kw in ["首页", "书架", "登录", "目录", "作者", "意见", "关于", "上一页", "下一页", "尾页", "排行榜", "打开APP"]):
                     continue
-                
                 full_url = urljoin(base_domain, href) if not href.startswith("http") else href
-                
                 if full_url.startswith("http://") or full_url.startswith("https://"):
                     if not any(c['url'] == full_url for c in chapters):
                         chapters.append({"title": text, "url": full_url})
-
         return chapters
     except Exception as e:
         raise Exception(f"解析书本目录失败: {e}")
@@ -293,7 +284,6 @@ def fetch_youtube_transcript_backend(video_id, full_url=""):
                 return True, full_text, "auto"
             except Exception:
                 pass
-
     if HAS_YTDLP and full_url:
         try:
             ydl_opts = {
@@ -315,7 +305,6 @@ def fetch_youtube_transcript_backend(video_id, full_url=""):
                                 return True, clean_text, lang_key
         except Exception:
             pass
-
     return False, "后端抓取受限", "zh"
 
 def detect_language(text):
@@ -379,14 +368,12 @@ if input_mode == "✍️ 粘贴纯文本或单页网址(URL)":
 
 elif input_mode == "📚 智能分章节整本听书 (目录网址)":
     st.caption("🤖 AI 听书助理模式：输入整本书或小说的目录页网址，自动切章节并支持连续播放下一章！")
-    
     if "book_chapters" not in st.session_state:
         st.session_state.book_chapters = []
     if "current_chapter_idx" not in st.session_state:
         st.session_state.current_chapter_idx = 0
 
     catalog_url = st.text_input("请输入书籍目录页网址：", placeholder="https://www.example.com/book/12345/")
-    
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
         if st.button("📚 解析全书目录", use_container_width=True):
@@ -404,7 +391,6 @@ elif input_mode == "📚 智能分章节整本听书 (目录网址)":
                         st.error(f"{e}")
             else:
                 st.warning("请输入有效的目录网址！")
-
     with col_btn2:
         if st.button("🗑️ 清空目录重置", use_container_width=True):
             st.session_state.book_chapters = []
@@ -415,10 +401,8 @@ elif input_mode == "📚 智能分章节整本听书 (目录网址)":
         chapters = st.session_state.book_chapters
         idx = st.session_state.current_chapter_idx
         total = len(chapters)
-
         st.markdown("---")
         st.markdown(f"📖 **当前导读进度**：第 **{idx + 1}** 章 / 共 **{total}** 章")
-
         col_prev, col_info, col_next = st.columns([1, 2, 1])
         with col_prev:
             if st.button("◀️ 上一章", use_container_width=True, disabled=(idx <= 0)):
@@ -432,7 +416,6 @@ elif input_mode == "📚 智能分章节整本听书 (目录网址)":
                 st.session_state.current_chapter_idx += 1
                 st.session_state.full_audio_bytes = None
                 st.rerun()
-
         current_ch_url = chapters[idx]['url']
         with st.spinner(f"正在加载【{chapters[idx]['title']}】正文内容..."):
             try:
@@ -451,7 +434,6 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
         if video_id:
             with st.spinner("🤖 正在自动提取字幕..."):
                 success, yt_text, lang_code = fetch_youtube_transcript_backend(video_id, yt_url.strip())
-            
             if success:
                 raw_text = clean_extracted_text(yt_text)
                 detected_lang_code = detect_language(raw_text)
@@ -465,7 +447,6 @@ else:
     if uploaded_file is not None:
         filename = uploaded_file.name.lower()
         extracted_raw = ""
-        
         if filename.endswith(".txt"):
             extracted_raw = uploaded_file.read().decode("utf-8", errors="ignore")
         elif filename.endswith(".pdf"):
@@ -479,7 +460,6 @@ else:
             book = epub.read_epub(io.BytesIO(uploaded_file.read()))
             texts = [BeautifulSoup(item.get_content(), 'html.parser').get_text() for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)]
             extracted_raw = "\n".join(texts)
-
         raw_text = clean_extracted_text(extracted_raw)
         if len(raw_text.strip()) > 0:
             st.success(f"🎉 成功导入并深度清洗文件，共提取到 {len(raw_text)} 个有效字符！")
@@ -535,7 +515,7 @@ rate_percentage = int(round((speech_rate_val - 1.0) * 100))
 rate_str = f"{rate_percentage:+d}%"
 
 # --------------------------------------------------
-# 6. TTS 合成 + MD5 缓存 + 修复版 BGM 混音引擎
+# 6. TTS 合成 + MD5 缓存 + 强力反馈混音引擎
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -571,14 +551,12 @@ def split_text_chunks_safe(text, max_chunk_size=800):
 async def synth_single_chunk_cached(chunk, voice, rate_str, sem):
     chunk_hash = hashlib.md5(f"{chunk}_{voice}_{rate_str}".encode('utf-8')).hexdigest()
     cache_file = os.path.join(CACHE_DIR, f"{chunk_hash}.mp3")
-    
     if os.path.exists(cache_file):
         try:
             with open(cache_file, "rb") as f:
                 return f.read()
         except Exception:
             pass
-
     async with sem:
         audio_data = bytearray()
         try:
@@ -588,7 +566,6 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem):
                     audio_data.extend(item["data"])
         except Exception:
             pass
-            
         if len(audio_data) == 0:
             fallback = "zh-CN-XiaoxiaoNeural" if re.search(r'[\u4e00-\u9fa5]', chunk) else "en-US-AvaMultilingualNeural"
             try:
@@ -598,7 +575,6 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem):
                         audio_data.extend(item["data"])
             except Exception:
                 pass
-                
         res_bytes = bytes(audio_data)
         if len(res_bytes) > 0:
             try:
@@ -608,9 +584,10 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem):
                 pass
         return res_bytes
 
-def mix_bgm_with_audio(speech_bytes, volume_percent=15):
-    """广播剧级 BGM 混音器（修复版：自动对齐采样率与声道，确保混音绝对生效）"""
-    if not HAS_PYDUB or not speech_bytes:
+def mix_bgm_with_audio(speech_bytes, volume_percent=30):
+    """具有强力报错提示与状态反馈的 BGM 混音器"""
+    if not HAS_PYDUB or not FFMPEG_READY or not speech_bytes:
+        st.warning("⚠️ BGM 混音跳过：pydub 库未就绪或云端未安装 FFmpeg。")
         return speech_bytes
 
     try:
@@ -619,7 +596,6 @@ def mix_bgm_with_audio(speech_bytes, volume_percent=15):
 
         bgm_path = os.path.join(BGM_DIR, "gentle_bgm.mp3")
         if not os.path.exists(bgm_path):
-            # 生成丰满的 C大调三音和弦（根音261Hz、三音329Hz、五音392Hz），辨识度极高
             from pydub.generators import Sine
             tone1 = Sine(261.63).to_audio_segment(duration=speech_duration + 2000)
             tone2 = Sine(329.63).to_audio_segment(duration=speech_duration + 2000)
@@ -628,31 +604,29 @@ def mix_bgm_with_audio(speech_bytes, volume_percent=15):
         else:
             bgm = AudioSegment.from_file(bgm_path, format="mp3")
 
-        # 🔑 关键修复：强制对齐采样率和声道，防止 pydub 混音静默失效
         bgm = bgm.set_frame_rate(speech.frame_rate).set_channels(speech.channels)
 
-        # 让 BGM 循环匹配人声长度
         if len(bgm) < speech_duration:
             loops_needed = (speech_duration // len(bgm)) + 1
             bgm = bgm * loops_needed
 
-        bgm = bgm[:speech_duration].fade_in(1000).fade_out(1000)
+        bgm = bgm[:speech_duration].fade_in(800).fade_out(800)
         
-        # 音量映射：当设置为 40% 时音量非常清晰
-        volume_db = -30 + (volume_percent * 0.7)
+        # 音量增益：确保音量足够明显
+        volume_db = -25 + (volume_percent * 0.6)
         bgm = bgm + volume_db
 
         mixed = speech.overlay(bgm)
         output_io = io.BytesIO()
         mixed.export(output_io, format="mp3")
         
-        st.toast("🎵 BGM 沉浸式背景音乐混音成功！", icon="🎧")
+        st.success("🎵 混音成功：BGM 已成功叠加到音频中！")
         return output_io.getvalue()
     except Exception as e:
-        st.error(f"❌ BGM 混音异常: {e}")
+        st.error(f"❌ 混音崩溃报错详情: {e}")
         return speech_bytes
 
-async def generate_audio_bytes_parallel(text, voice, rate_str="+0%", max_concurrency=10, apply_bgm=False, volume_pct=15):
+async def generate_audio_bytes_parallel(text, voice, rate_str="+0%", max_concurrency=10, apply_bgm=False, volume_pct=30):
     clean_text = clean_markdown_for_speech(text)
     chunks = split_text_chunks_safe(clean_text)
     if not chunks:
@@ -682,7 +656,7 @@ async def generate_audio_bytes_parallel(text, voice, rate_str="+0%", max_concurr
             full_audio.extend(r)
             
     final_bytes = bytes(full_audio)
-    if apply_bgm and HAS_PYDUB:
+    if apply_bgm:
         with st.spinner("🎵 正在注入 BGM 沉浸式背景音乐..."):
             final_bytes = mix_bgm_with_audio(final_bytes, volume_pct)
 
