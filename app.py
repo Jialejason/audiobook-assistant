@@ -19,11 +19,9 @@ from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
 # --------------------------------------------------
-# 0. 环境与依赖严格诊断 (包含原生 FFmpeg 路径补全与 Python 3.14 audioop 适配)
+# 0. 环境与依赖诊断 (自动激活原生 FFmpeg / imageio-ffmpeg & Python 3.14 audioop 适配)
 # --------------------------------------------------
-# 💡 关键修复 1：兼容 Python 3.13+ / 3.14 移除的 audioop 内置库
-import sys
-
+# 💡 兼容 Python 3.13+ / 3.14 移除的 audioop 内置库
 try:
     import audioop
 except ImportError:
@@ -33,7 +31,7 @@ except ImportError:
     except ImportError:
         pass
 
-# 💡 关键修复 2：强制补全 Linux 系统二进制路径到 PATH 环境变量
+# 💡 补全 Linux 系统二进制路径到 PATH 环境变量
 for path_dir in ["/usr/bin", "/usr/local/bin", "/bin"]:
     if path_dir not in os.environ.get("PATH", "").split(os.path.pathsep):
         os.environ["PATH"] = path_dir + os.path.pathsep + os.environ.get("PATH", "")
@@ -48,6 +46,32 @@ try:
     HAS_PYDUB = True
 except ImportError as e:
     FFMPEG_ERROR_MSG = f"pydub 导入失败: {e}"
+
+# 🔍【核心修复】FFmpeg 自动智能探测与 Pydub 绑定逻辑
+ffmpeg_sys_path = shutil.which("ffmpeg")
+if ffmpeg_sys_path:
+    FFMPEG_READY = True
+    FFMPEG_SOURCE = f"原生 FFmpeg ({ffmpeg_sys_path})"
+    if HAS_PYDUB:
+        AudioSegment.converter = ffmpeg_sys_path
+        AudioSegment.ffmpeg = ffmpeg_sys_path
+else:
+    try:
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if ffmpeg_exe and os.path.exists(ffmpeg_exe):
+            FFMPEG_READY = True
+            FFMPEG_SOURCE = f"imageio-ffmpeg ({ffmpeg_exe})"
+            ffmpeg_dir = os.path.dirname(ffmpeg_exe)
+            if ffmpeg_dir not in os.environ.get("PATH", "").split(os.path.pathsep):
+                os.environ["PATH"] = ffmpeg_dir + os.path.pathsep + os.environ.get("PATH", "")
+            if HAS_PYDUB:
+                AudioSegment.converter = ffmpeg_exe
+                AudioSegment.ffmpeg = ffmpeg_exe
+        else:
+            FFMPEG_ERROR_MSG = "未检测到有效的 FFmpeg 二进制文件"
+    except Exception as ex:
+        FFMPEG_ERROR_MSG = f"imageio-ffmpeg 检测失败: {ex}"
 
 CACHE_DIR = ".audio_cache"
 BGM_DIR = "."
@@ -86,7 +110,7 @@ except ImportError:
     HAS_TRAFILATURA = False
 
 # --------------------------------------------------
-# 🌟 严格筛选的各国顶级高保真音色库 (品质严选)
+# 🌟 严选音色库配置
 # --------------------------------------------------
 CURATED_VOICES = {
     "zh-CN-YunxiNeural": "🎙️ [中文普通话] 云希 (有声书/广播剧热播·男)",
@@ -110,7 +134,7 @@ LOCALE_LANG_MAP = {'zh-CN': ('中文普通话', 'Mandarin'), 'en-US': ('美式�
 LOCALE_FLAGS = {'zh-CN': '🇨🇳', 'en-US': '🇺🇸', 'ja-JP': '🇯🇵'}
 
 # --------------------------------------------------
-# 1. 页面基本配置
+# 1. 页面配置
 # --------------------------------------------------
 st.set_page_config(
     page_title="随身听书 & 思维助手 (AI广播剧全能版)", page_icon="🎧", layout="centered"
@@ -127,7 +151,7 @@ st.caption(
 with st.sidebar:
     st.header("⚙️ 引擎与影音设置")
     
-    # 🔍 状态诊断面板 (显示当前 FFmpeg 的绑定状态)
+    # 🔍 状态诊断面板
     if HAS_PYDUB and FFMPEG_READY:
         st.success(f"✅ BGM / 多角色混音引擎就绪\n({FFMPEG_SOURCE})")
     else:
@@ -152,7 +176,6 @@ with st.sidebar:
         help="开启后将为你生成的听书音频自动叠加背景音乐！"
     )
     
-    # 扫描当前项目目录下所有的 MP3 背景音乐文件
     available_bgm_files = [f for f in os.listdir(BGM_DIR) if f.lower().endswith(".mp3") and not f.startswith(".")]
     bgm_options = ["🎹 系统默认柔和和弦"] + available_bgm_files
     
@@ -165,7 +188,6 @@ with st.sidebar:
     
     bgm_volume = st.slider("🎚️ BGM 音量比例:", min_value=5, max_value=50, value=30, format="%d%%")
     
-    # 📤 手机直接上传 BGM
     with st.expander("📤 上传我的背景音乐 (.mp3)", expanded=False):
         uploaded_bgm = st.file_uploader("选择手机里的 MP3 文件上传：", type=["mp3"], key="bgm_uploader")
         if uploaded_bgm is not None:
@@ -195,7 +217,7 @@ with st.sidebar:
     )
 
 # --------------------------------------------------
-# 3. 核心：全源通用深度智能清洗引擎 & 伪链接过滤器
+# 3. 核心清洗引擎 & 网页处理
 # --------------------------------------------------
 def clean_extracted_text(text):
     if not text:
@@ -402,13 +424,9 @@ def run_async_safe(coroutine):
             loop.close()
 
 # --------------------------------------------------
-# 4. 🧠 全自动广播剧剧本拆分解析器 (男女角色自动分配)
+# 4. 🧠 广播剧剧本拆分器
 # --------------------------------------------------
 def parse_multi_role_script(text):
-    """
-    智能剧本拆分器：将任意文本切割为 (role, segment) 列表
-    role 类型: "NARRATOR" (旁白), "MALE" (男声), "FEMALE" (女声)
-    """
     male_keywords = ["他", "男", "先生", "少爷", "爸爸", "父亲", "爷爷", "哥", "叔", "师父", "队长", "老者", "皇上", "兄"]
     female_keywords = ["她", "女", "小姐", "夫人", "妈妈", "母亲", "奶奶", "姐", "妹", "姨", "师姐", "丫头", "皇后", "娘"]
 
@@ -449,7 +467,7 @@ def parse_multi_role_script(text):
     return parsed_script
 
 # --------------------------------------------------
-# 5. 音色选择与角色分配界面
+# 5. 音色选择
 # --------------------------------------------------
 @st.cache_resource
 def fetch_all_global_voices():
@@ -498,7 +516,7 @@ rate_percentage = int(round((speech_rate_val - 1.0) * 100))
 rate_str = f"{rate_percentage:+d}%"
 
 # --------------------------------------------------
-# 6. 多功能输入层
+# 6. 输入界面
 # --------------------------------------------------
 st.subheader("📥 导入阅读内容")
 input_mode = st.radio(
@@ -634,7 +652,6 @@ else:
             with st.expander("📄 查看 / 编辑提取出的纯净文本", expanded=False):
                 raw_text = st.text_area("文本预览：", raw_text, height=180)
 
-# 大文件超长保护
 active_process_text = raw_text
 if len(raw_text) > 8000:
     st.info("💡 检测到超长文件/图书，已为你自动激活【章节智能切片器】！")
@@ -644,7 +661,7 @@ if len(raw_text) > 8000:
     active_process_text = auto_chapters[selected_ch_idx]["content"]
 
 # --------------------------------------------------
-# 7. TTS 合成 + MD5 缓存 + 多角色并发合成 + 动态 BGM 混音
+# 7. TTS 合成 + 动态 BGM 混音
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -721,9 +738,8 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem=None):
         return await do_synth()
 
 def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=30):
-    """具有强力报错提示与状态反馈的 BGM 混音器"""
     if not HAS_PYDUB or not FFMPEG_READY or not speech_bytes:
-        st.warning("⚠️ BGM 混音跳过：pydub 库未就绪或云端未安装 FFmpeg。")
+        st.warning("⚠️ BGM 混音跳过：pydub 库未就绪或未检测到 FFmpeg。")
         return speech_bytes
 
     try:
@@ -774,7 +790,6 @@ async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_fem
         progress_bar = st.progress(0, text=f"🎭 正在并发合成多角色广播剧 (共 {len(script_segments)} 段对白/旁白)...")
         role_voice_map = {"NARRATOR": v_narrator, "MALE": v_male, "FEMALE": v_female}
         
-        # 并发极速加速：同时合成多段对白
         async def synth_segment_task(idx, role, seg_text):
             v = role_voice_map.get(role, v_narrator)
             seg_bytes = await synth_single_chunk_cached(seg_text, v, rate_str, sem)
@@ -846,7 +861,7 @@ async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_fem
     return final_bytes
 
 # --------------------------------------------------
-# 8. 字库与金句卡片引擎
+# 8. 金句卡片生成引擎
 # --------------------------------------------------
 @st.cache_resource
 def get_chinese_font(font_size=20):
@@ -928,7 +943,7 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     return img_byte_arr.getvalue()
 
 # --------------------------------------------------
-# 9. 知识提炼引擎
+# 9. 知识提炼
 # --------------------------------------------------
 def clean_sentence_prefix(sentence):
     cleaned = sentence.strip()
