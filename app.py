@@ -14,6 +14,13 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
+# 尝试导入 youtube_transcript_api
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+    HAS_YOUTUBE_API = True
+except ImportError:
+    HAS_YOUTUBE_API = False
+
 # 尝试导入 trafilatura（网页正文智能提取库）
 try:
     import trafilatura
@@ -30,7 +37,7 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手")
 st.caption(
-    "全领域动态自适应版：智能分章节听书助理 + 增强型纯代码提炼引擎 + 动态字库"
+    "全语种动态自适应版：YouTube多语言字幕抓取 + 智能分章节听书 + 国际化 TTS 引擎"
 )
 
 # --------------------------------------------------
@@ -50,7 +57,7 @@ with st.sidebar:
     )
 
 # --------------------------------------------------
-# 3. 高级网页与目录解析函数
+# 3. 高级网页与 YouTube 自动解析函数
 # --------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_text_from_url(url):
@@ -127,6 +134,40 @@ def extract_youtube_id(url):
             return match.group(1)
     return None
 
+@st.cache_data(show_spinner=False, ttl=1800)
+def fetch_youtube_transcript_backend(video_id):
+    """Python 后端直接全语种抓取 YouTube 字幕"""
+    if not HAS_YOUTUBE_API:
+        return False, "未安装 youtube_transcript_api 库", "en"
+    try:
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        # 优先语言匹配顺序：英文、繁体、简体、日文、西班牙语、德语、法语
+        preferred_langs = ['en', 'zh-Hant', 'zh-Hans', 'zh-TW', 'zh-CN', 'zh', 'ja', 'es', 'de', 'fr', 'ko']
+        try:
+            transcript = transcript_list.find_transcript(preferred_langs)
+        except Exception:
+            # 若优先语言未找到，取视频自带的任意第一个公开字幕
+            transcript = next(iter(transcript_list))
+        
+        data = transcript.fetch()
+        full_text = " ".join([item['text'] for item in data])
+        return True, full_text, transcript.language_code
+    except TranscriptsDisabled:
+        return False, "抓取失败：该视频已被作者关闭公开 CC 字幕。", "zh"
+    except Exception as e:
+        return False, f"后端抓取受限: {str(e)}", "zh"
+
+def detect_language(text):
+    """简易语种识别引擎"""
+    if re.search(r'[\u4e00-\u9fa5]', text):
+        return 'zh'
+    elif re.search(r'[\u3040-\u30ff]', text):
+        return 'ja'
+    elif re.search(r'[\uac00-\ud7af]', text):
+        return 'ko'
+    else:
+        return 'en'
+
 # --------------------------------------------------
 # 4. 多功能输入层
 # --------------------------------------------------
@@ -138,12 +179,13 @@ input_mode = st.radio(
 )
 
 raw_text = ""
+detected_lang_code = "zh"
 
 if input_mode == "✍️ 粘贴纯文本或单页网址(URL)":
     user_input = st.text_area(
         "粘贴文本或网页网址（以 http/https 开头）：",
         height=160,
-        placeholder="粘贴文章纯文本、单篇知乎/新闻链接或字幕...\n提示：单次建议控制在 2000-15000 字以内，体验最流畅！",
+        placeholder="粘贴文章纯文本、单篇知乎/新闻链接、英文 TED 字幕...\n提示：单次建议控制在 2000-15000 字以内，体验最流畅！",
     )
     if user_input.strip():
         text_candidate = user_input.strip()
@@ -162,6 +204,7 @@ if input_mode == "✍️ 粘贴纯文本或单页网址(URL)":
                     raw_text = user_input
         else:
             raw_text = user_input
+        detected_lang_code = detect_language(raw_text)
 
 elif input_mode == "📚 智能分章节整本听书 (目录网址)":
     st.caption("🤖 AI 听书助理模式：输入整本书或小说的目录页网址，自动切章节并支持连续播放下一章！")
@@ -227,6 +270,7 @@ elif input_mode == "📚 智能分章节整本听书 (目录网址)":
             try:
                 raw_text = fetch_text_from_url(current_ch_url)
                 st.info(f"✅ 本章加载成功，共 {len(raw_text)} 个字符。点击下方按钮即可一键听书或提炼！")
+                detected_lang_code = detect_language(raw_text)
             except Exception as e:
                 raw_text = f"加载章节正文出错: {e}"
                 st.error(raw_text)
@@ -234,82 +278,92 @@ elif input_mode == "📚 智能分章节整本听书 (目录网址)":
 elif input_mode == "🌐 粘贴 YouTube 视频链接":
     yt_url = st.text_input(
         "请输入 YouTube 视频网址：",
-        placeholder="https://youtu.be/..."
+        placeholder="https://www.youtube.com/watch?v=... 或 https://youtu.be/..."
     )
     if yt_url.strip():
         video_id = extract_youtube_id(yt_url.strip())
         if video_id:
-            st.markdown("#### 📱 CORS 跨域代理抓取")
-            st.caption("提示：利用手机本地网络与 CORS 代理桥梁抓取字幕，完全绕过云端 IP 限制。")
+            with st.spinner("🤖 正在尝试 Python 后端全语种自动提取字幕..."):
+                success, yt_text, lang_code = fetch_youtube_transcript_backend(video_id)
             
-            js_code = f"""
-            <div style="font-family: system-ui, -apple-system, sans-serif; padding: 12px; background: #1e293b; border-radius: 10px; color: #fff;">
-                <button id="fetchBtn" style="background: #2563eb; color: white; border: none; padding: 12px 18px; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; font-size: 15px;">
-                    ⚡ 启动手机 CORS 跨域代理抓取字幕
-                </button>
-                <div id="status" style="margin-top: 10px; font-size: 13px; color: #94a3b8; text-align: center;">准备就绪，点击上方按钮开始抓取</div>
-                <textarea id="resultText" style="width: 100%; height: 110px; margin-top: 10px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-size: 13px; display: none;" readonly></textarea>
-            </div>
-
-            <script>
-            document.getElementById('fetchBtn').addEventListener('click', async () => {{
-                const status = document.getElementById('status');
-                const resultText = document.getElementById('resultText');
-                const videoId = "{video_id}";
+            if success:
+                raw_text = yt_text
+                detected_lang_code = lang_code
+                st.success(f"🎉 字幕抓取成功！检测到语言标记: [{lang_code}]，共 {len(raw_text)} 个字符。")
+                st.text_area("📹 提取的字幕文本预览", raw_text, height=140)
+            else:
+                st.warning(f"⚠️ {yt_text}")
+                st.markdown("#### 📱 备用方案：启动 CORS 跨域代理抓取")
+                st.caption("如果后端云端 IP 被限制，可点击下方按钮使用手机本地网络抓取字幕：")
                 
-                status.innerText = "⏳ 正在连接 CORS 跨域代理抓取字幕...";
-                status.style.color = "#fbbf24";
+                js_code = f"""
+                <div style="font-family: system-ui, -apple-system, sans-serif; padding: 12px; background: #1e293b; border-radius: 10px; color: #fff;">
+                    <button id="fetchBtn" style="background: #2563eb; color: white; border: none; padding: 12px 18px; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; font-size: 15px;">
+                        ⚡ 启动手机 CORS 跨域代理抓取字幕
+                    </button>
+                    <div id="status" style="margin-top: 10px; font-size: 13px; color: #94a3b8; text-align: center;">准备就绪，点击上方按钮开始抓取</div>
+                    <textarea id="resultText" style="width: 100%; height: 110px; margin-top: 10px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-size: 13px; display: none;" readonly></textarea>
+                </div>
 
-                const targetApi = `https://yt.lemnoslife.com/noKey/captions?videoId=${{videoId}}`;
-                const proxies = [
-                    `https://api.allorigins.win/raw?url=${{encodeURIComponent(targetApi)}}`,
-                    `https://corsproxy.io/?${{encodeURIComponent(targetApi)}}`
-                ];
+                <script>
+                document.getElementById('fetchBtn').addEventListener('click', async () => {{
+                    const status = document.getElementById('status');
+                    const resultText = document.getElementById('resultText');
+                    const videoId = "{video_id}";
+                    
+                    status.innerText = "⏳ 正在连接 CORS 跨域代理抓取字幕...";
+                    status.style.color = "#fbbf24";
 
-                let fetchedText = "";
+                    const targetApi = `https://yt.lemnoslife.com/noKey/captions?videoId=${{videoId}}`;
+                    const proxies = [
+                        `https://api.allorigins.win/raw?url=${{encodeURIComponent(targetApi)}}`,
+                        `https://corsproxy.io/?${{encodeURIComponent(targetApi)}}`
+                    ];
 
-                for (let proxyUrl of proxies) {{
-                    try {{
-                        let response = await fetch(proxyUrl);
-                        if (response.ok) {{
-                            let data = await response.json();
-                            let tracks = data.subtitles || [];
-                            if (tracks.length > 0) {{
-                                let trackUrl = tracks[0].baseUrl;
-                                let xmlProxy = `https://api.allorigins.win/raw?url=${{encodeURIComponent(trackUrl)}}`;
-                                let xmlRes = await fetch(xmlProxy);
-                                let xmlText = await xmlRes.text();
-                                
-                                let parser = new DOMParser();
-                                let xmlDoc = parser.parseFromString(xmlText, "text/xml");
-                                let textNodes = xmlDoc.getElementsByTagName("text");
-                                
-                                let lines = [];
-                                for (let i = 0; i < textNodes.length; i++) {{
-                                    let txt = textNodes[i].textContent.replace(/<[^>]+>/g, '').trim();
-                                    if (txt) lines.push(txt);
+                    let fetchedText = "";
+
+                    for (let proxyUrl of proxies) {{
+                        try {{
+                            let response = await fetch(proxyUrl);
+                            if (response.ok) {{
+                                let data = await response.json();
+                                let tracks = data.subtitles || [];
+                                if (tracks.length > 0) {{
+                                    let trackUrl = tracks[0].baseUrl;
+                                    let xmlProxy = `https://api.allorigins.win/raw?url=${{encodeURIComponent(trackUrl)}}`;
+                                    let xmlRes = await fetch(xmlProxy);
+                                    let xmlText = await xmlRes.text();
+                                    
+                                    let parser = new DOMParser();
+                                    let xmlDoc = parser.parseFromString(xmlText, "text/xml");
+                                    let textNodes = xmlDoc.getElementsByTagName("text");
+                                    
+                                    let lines = [];
+                                    for (let i = 0; i < textNodes.length; i++) {{
+                                        let txt = textNodes[i].textContent.replace(/<[^>]+>/g, '').trim();
+                                        if (txt) lines.push(txt);
+                                    }}
+                                    fetchedText = lines.join('\\n');
+                                    if (fetchedText.length > 30) break;
                                 }}
-                                fetchedText = lines.join('\\n');
-                                if (fetchedText.length > 30) break;
                             }}
-                        }}
-                    }} catch (e) {{}}
-                }}
+                        }} catch (e) {{}}
+                    }}
 
-                if (fetchedText.length > 30) {{
-                    status.innerText = "✅ 抓取成功！已自动选中文本，复制后切到【粘贴纯文本】模式即可使用：";
-                    status.style.color = "#4ade80";
-                    resultText.value = fetchedText;
-                    resultText.style.display = "block";
-                    resultText.select();
-                }} else {{
-                    status.innerText = "⚠️ 抓取失败：该视频作者未开启公开 CC 字幕（或字幕已被限制）。";
-                    status.style.color = "#f87171";
-                }}
-            }});
-            </script>
-            """
-            st.components.v1.html(js_code, height=220)
+                    if (fetchedText.length > 30) {{
+                        status.innerText = "✅ 抓取成功！已自动选中文本，复制后切到【粘贴纯文本】模式即可使用：";
+                        status.style.color = "#4ade80";
+                        resultText.value = fetchedText;
+                        resultText.style.display = "block";
+                        resultText.select();
+                    }} else {{
+                        status.innerText = "⚠️ 抓取失败：该视频作者未开启公开 CC 字幕（或字幕已被限制）。";
+                        status.style.color = "#f87171";
+                    }}
+                }});
+                </script>
+                """
+                st.components.v1.html(js_code, height=220)
         else:
             st.error("无效的 YouTube 链接，请检查网址格式。")
 
@@ -322,35 +376,56 @@ else:
             raw_text = uploaded_file.read().decode("utf-8", errors="ignore")
         elif uploaded_file.name.endswith(".pdf"):
             pdf_reader = PdfReader(uploaded_file)
+            extracted_pages = []
             for page in pdf_reader.pages:
                 text_page = page.extract_text()
                 if text_page:
-                    raw_text += text_page + "\n"
+                    extracted_pages.append(text_page)
+            raw_text = "\n".join(extracted_pages)
         st.success(f"成功导入文件，共读取到 {len(raw_text)} 个字符！")
+        detected_lang_code = detect_language(raw_text)
 
 # --------------------------------------------------
-# 5. 全球多语种音色选择
+# 5. 全球多语种音色映射与自适应匹配
 # --------------------------------------------------
 VOICE_MAP = {
     "zh-CN-XiaoxiaoNeural": "💃 Xiaoxiao - 经典御姐 / 知性温婉 (推荐)",
     "zh-CN-YunxiNeural": "🎙️ Yunxi - 磁性男主角 (小说听书推荐)",
+    "en-US-JennyNeural": "🇺🇸 Jenny (美音) - 自然清晰 / TED 播客推荐",
+    "en-US-GuyNeural": "🇺🇸 Guy (美音) - 商务稳重 / 英文解说",
+    "en-GB-SoniaNeural": "🇬🇧 Sonia (英音) - 标准优雅 / 商务英音",
     "zh-HK-HiuMaanNeural": "🇭🇰 HiuMaan - 标准粤语 / 港台风情",
     "zh-TW-HsiaoChenNeural": "🍵 HsiaoChen - 台湾腔 / 软萌甜美",
-    "zh-CN-XiaoruiNeural": "🌸 Xiaorui - 柔和少女 / 清新可人",
-    "zh-CN-XiaoyiNeural": "🎀 Xiaoyi - 娇软萌妹 / 甜美萝莉音",
     "zh-CN-YunjianNeural": "💼 Yunjian - 沉稳解说 / 商务男声",
     "zh-CN-YunyangNeural": "📢 Yunyang - 专业新闻播音 / 正气男声",
-    "zh-CN-XiaozhenNeural": "📖 Xiaozhen - 故事绘本 / 亲切女声",
-    "zh-CN-YunfengNeural": "🎬 Yunfeng - 影视解说 / 沉稳男声",
-    "zh-CN-YunhaoNeural": "👦 Yunhao - 活力少男 / 朝气澎湃",
-    "en-US-JennyNeural": "🇺🇸 Jenny (美音) - 自然清晰 / 播客首选",
-    "en-US-GuyNeural": "🇺🇸 Guy (美音) - 商务稳重 / 男声解说",
     "ja-JP-NanamiNeural": "🇯🇵 Nanami (日语) - 甜美自然 / 亲切女声",
     "ko-KR-SunHiNeural": "🇰🇷 SunHi (韩语) - 温柔细腻 / 韩剧女声",
+    "es-ES-ElviraNeural": "🇪🇸 Elvira (西班牙语) - 标准通用西语",
 }
+
+# 根据语种自动匹配最佳索引
+def get_default_voice_index(lang):
+    lang_lower = str(lang).lower()
+    if "en" in lang_lower:
+        return 2  # Jenny (美音)
+    elif "ja" in lang_lower:
+        return 9  # Nanami (日语)
+    elif "ko" in lang_lower:
+        return 10 # SunHi (韩语)
+    elif "es" in lang_lower:
+        return 11 # Elvira (西语)
+    elif "hant" in lang_lower or "tw" in lang_lower:
+        return 6  # HsiaoChen (台湾腔)
+    elif "hk" in lang_lower:
+        return 5  # HiuMaan (粤语)
+    return 0     # 默认中文 Xiaoxiao
+
+default_idx = get_default_voice_index(detected_lang_code)
+
 voice_option = st.selectbox(
-    "选择朗读音色：",
+    "选择朗读音色（已根据检测语种为您智能推荐）：",
     options=list(VOICE_MAP.keys()),
+    index=default_idx,
     format_func=lambda x: VOICE_MAP[x],
 )
 
@@ -414,7 +489,7 @@ async def synth_single_chunk(chunk, voice):
             if item["type"] == "audio":
                 audio_data.extend(item["data"])
     except Exception:
-        fallback = "zh-CN-XiaoxiaoNeural"
+        fallback = "zh-CN-XiaoxiaoNeural" if "zh" in voice else "en-US-JennyNeural"
         communicate = edge_tts.Communicate(chunk, fallback)
         async for item in communicate.stream():
             if item["type"] == "audio":
@@ -445,7 +520,7 @@ def run_async_safe(coroutine):
             loop.close()
 
 # --------------------------------------------------
-# 7. 跨平台自适应字库引擎
+# 7. 跨平台自适应字库引擎与金句卡片生成
 # --------------------------------------------------
 @st.cache_resource
 def get_chinese_font(font_size=20):
@@ -594,16 +669,14 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     return img_byte_arr.getvalue()
 
 # --------------------------------------------------
-# 8. 智能增强型本地提炼引擎（已升级：严格过滤标题与噪声）
+# 8. 全语种自适应知识提炼引擎
 # --------------------------------------------------
 def clean_sentence_prefix(sentence):
     cleaned = sentence.strip()
     patterns = [
         r"^(?:[0-9一二三四五六七八九十]+[.\s、]|核心观点|观点|总结|总之|首先|其次|最后)[：:\s]*",
-        r"^网上曾有一个广为流传的段子[：:]?",
         r"^我认为[，,]?",
         r"^在我看来[，,]?",
-        r"^著名的科学家.*曾经说[，,]?",
         r"^我举一个简单的例子[：:]?",
     ]
     for p in patterns:
@@ -612,12 +685,11 @@ def clean_sentence_prefix(sentence):
 
 def is_noise_or_heading(sentence):
     s = sentence.strip()
-    # 严格过滤掉标题、元数据、导读提示词、章节小标题
-    if any(kw in s for kw in ["深度领读", "导读", "作者：", "来源：", "点击上方", "关注我们", "原创说明"]):
+    if any(kw in s for kw in ["深度领读", "导读", "作者：", "来源：", "点击上方", "关注我们"]):
         return True
-    if re.match(r'^(?:[一二三四五六七八九十]+[、\.\s]|\d+[、\.\s]|结语|总结|引言|前言|摘要|本章|一、|二、|三、|四、)', s):
+    if re.match(r'^(?:[一二三四五六七八九十]+[、\.\s]|\d+[、\.\s]|结语|总结|引言|前言|摘要)', s):
         return True
-    if len(s) < 15 or len(s) > 120:
+    if len(s) < 15 or len(s) > 140:
         return True
     return False
 
@@ -653,7 +725,7 @@ def extract_with_ollama(text, model_name):
             if quote_match:
                 top_quote = quote_match.group(1).split("\n")[0].strip()
             else:
-                top_quote = "把握事物的底层逻辑与增长原则。"
+                top_quote = "把握事物的底层逻辑与核心原则。"
 
             return ai_output, top_quote, ["知识提炼", "核心要领"]
         else:
@@ -669,59 +741,40 @@ def extract_ultimate_local_insights(text):
     char_count = len(text)
     read_minutes = round(char_count / 300, 1)
 
-    auto_discovered_words = jieba.analyse.textrank(
-        text, topK=25, withWeight=False, allowPOS=("n", "vn", "nz", "nr", "nt")
-    )
-    for word in auto_discovered_words:
-        if len(word) >= 2:
-            jieba.add_word(word)
+    # 智能判别是否含有中文
+    has_chinese = bool(re.search(r'[\u4e00-\u9fa5]', text))
 
-    keywords = jieba.analyse.textrank(
-        text, topK=6, withWeight=False, allowPOS=("n", "vn", "nz", "nr", "nt", "eng")
-    )
+    if has_chinese:
+        keywords = jieba.analyse.textrank(
+            text, topK=6, withWeight=False, allowPOS=("n", "vn", "nz", "nr", "nt", "eng")
+        )
+    else:
+        # 英文等非中文文本关键词简易抓取
+        words = re.findall(r'\b[A-Za-z]{4,}\b', text)
+        keywords = list(set(words))[:6]
 
     paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
-    headings = []
     candidates = []
     data_sentences = []
-    definition_sentences = []
     
-    for p_idx, p in enumerate(paragraphs):
-        # 收集结构骨架（排除标题行）
-        if len(p) < 22 and not any(p.endswith(x) for x in ["。", "！", "？"]):
-            if not any(kw in p for kw in ["深度领读", "导读"]):
-                headings.append(p)
-            continue
-
-        sentences = re.split(r"[。！!？\?]", p)
-        for s_idx, s in enumerate(sentences):
+    for p in paragraphs:
+        sentences = re.split(r"[。！!？\?.]", p)
+        for s in sentences:
             s_clean = s.strip()
             if is_noise_or_heading(s_clean):
                 continue
 
-            if re.search(r"\d+(\.\d+)?(%|亿|万|次方|年|层|个)?", s_clean) and len(s_clean) > 15:
+            if re.search(r"\d+(\.\d+)?(%|亿|万|percent|years|times)?", s_clean) and len(s_clean) > 15:
                 if s_clean not in data_sentences and len(data_sentences) < 3:
                     data_sentences.append(clean_sentence_prefix(s_clean))
 
-            # 寻找定义句或核心观点
-            if any(w in s_clean for w in ["本质是", "意味着", "复利是", "核心在于", "视作", "规律", "普适的"]):
-                if not any(kw in s_clean for kw in ["深度领读", "导读"]):
-                    definition_sentences.append(clean_sentence_prefix(s_clean))
-
             score = 0
-            if s_idx == 0:
-                score += 2
-            
             if any(kw in s_clean for kw in keywords[:5]):
                 score += 4
-                
-            if any(w in s_clean for w in ["底层", "核心", "关键", "本质", "原则", "规律", "逻辑"]):
-                score += 4
-                
-            if any(w in s_clean for w in ["等于", "意味着", "决定了", "在于", "归根结底", "则是"]):
-                score += 6
+            if any(w in s_clean.lower() for w in ["important", "key", "essential", "core", "底层", "核心", "关键", "本质"]):
+                score += 5
 
-            if score >= 5:
+            if score >= 4:
                 clean_s = clean_sentence_prefix(s_clean)
                 if clean_s and not is_noise_or_heading(clean_s):
                     candidates.append((score, clean_s))
@@ -735,27 +788,12 @@ def extract_ultimate_local_insights(text):
             seen.add(s)
             unique_candidates.append(s)
 
-    # 智能挑选一句话精髓
-    top_one_sentence = ""
-    if definition_sentences:
-        top_one_sentence = definition_sentences[0]
-    elif unique_candidates:
-        top_one_sentence = unique_candidates[0]
-    else:
-        top_one_sentence = "把握文章的核心逻辑与增长原则。"
-
+    top_one_sentence = unique_candidates[0] if unique_candidates else "把握文本的核心逻辑与核心观点。"
     top_points = unique_candidates[:3] if len(unique_candidates) >= 3 else unique_candidates
 
     summary_md = f"📈 **文本体检**：全文共 **{char_count}** 字  |  ⏱️ 预估阅读约 **{read_minutes}** 分钟\n\n"
-    
     kw_badges = " ".join([f"`#{kw}`" for kw in keywords]) if keywords else "暂无"
     summary_md += f"🏷️ **核心主题标签**：\n{kw_badges}\n\n"
-
-    if headings:
-        summary_md += "🧩 **文章结构骨架**：\n"
-        for h in headings[:5]:
-            summary_md += f"• **{h}**\n"
-        summary_md += "\n"
 
     summary_md += "🎯 **核心观点深度提炼**：\n"
     if top_points:
