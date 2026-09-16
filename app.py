@@ -23,10 +23,10 @@ except ImportError:
     HAS_PYDUB = False
 
 # --------------------------------------------------
-# 0. MD5 磁盘缓存与 BGM 根目录初始化 (已适配手机直接根目录上传)
+# 0. MD5 磁盘缓存与 BGM 根目录初始化
 # --------------------------------------------------
 CACHE_DIR = ".audio_cache"
-BGM_DIR = "."  # 👈 修改此处：指向根目录，方便手机直接上传 gentle_bgm.mp3
+BGM_DIR = "."  # 指向根目录，方便手机直接上传 gentle_bgm.mp3
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # 尝试导入 python-docx 与 ebooklib (扩展电子书支持)
@@ -113,11 +113,6 @@ with st.sidebar:
 # 3. 核心：全源通用深度智能清洗引擎 & 伪链接过滤器
 # --------------------------------------------------
 def clean_extracted_text(text):
-    """
-    全源通用深度智能清洗引擎：
-    适用于 TXT / PDF / DOCX / EPUB / 网页正文 / YouTube 字幕 / 粘贴文本
-    彻底剔除：页码、连排跨页页码、印刷编码、版权黑名单、排版杂音、全角标点异化、非标点断行
-    """
     if not text:
         return ""
     
@@ -136,12 +131,12 @@ def clean_extracted_text(text):
     noise_symbols = {"M", "W", "NNN", "B", "FES", "0", "00", "000"}
 
     page_patterns = [
-        r'^\s*\d+(\s+\d+)*\s*$',         # 纯数字 "12" 以及双页码 "2 3", "4 5", "20 21"
-        r'^\s*-\s*\d+\s*-\s*$',         # 带横杠页码: "- 12 -"
-        r'^\s*第\s*\d+\s*[页頁]\s*$',     # 繁简中文页码: "第 12 页" / "第 12 頁"
-        r'^\s*Page\s*\d+\s*$',          # 英文页码: "Page 12"
-        r'^[A-Z0-9_\-]+/\d+.*$',        # 印刷出版批号: "J4345_04/10製作"
-        r'^\s*\d+\s*/\s*\d+\s*$',       # 分数型页码: "1/22"
+        r'^\s*\d+(\s+\d+)*\s*$',
+        r'^\s*-\s*\d+\s*-\s*$',
+        r'^\s*第\s*\d+\s*[页頁]\s*$',
+        r'^\s*Page\s*\d+\s*$',
+        r'^[A-Z0-9_\-]+/\d+.*$',
+        r'^\s*\d+\s*/\s*\d+\s*$',
     ]
 
     for line in lines:
@@ -167,7 +162,6 @@ def clean_extracted_text(text):
     return full_text.strip()
 
 def split_text_into_chapters(full_text):
-    """自动将数十万字大文本切分为按章节加载的小片段"""
     if not full_text:
         return []
     pattern = r'(?=\n\s*(?:第[0-9一二三四五六七八九十百千]+[章卷节部]|Chapter\s+\d+|【第.*章】))'
@@ -245,10 +239,6 @@ def fetch_text_from_url(url):
         raise Exception(f"网页抓取失败: {e}")
 
 def parse_book_catalog(catalog_url):
-    """
-    增强版书本目录解析引擎：
-    彻底清洗并过滤 javascript:void(0)、# 锚点以及 APP 唤醒等伪链接
-    """
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"}
     try:
         res = requests.get(catalog_url, headers=headers, timeout=12)
@@ -263,7 +253,6 @@ def parse_book_catalog(catalog_url):
             text = a.get_text().strip()
             href = a['href'].strip()
             
-            # 🚨 1. 过滤 javascript: 伪链接、纯锚点与空链接
             if not href or href.startswith("javascript:") or href == "#" or "openapp" in href.lower():
                 continue
 
@@ -273,7 +262,6 @@ def parse_book_catalog(catalog_url):
                 
                 full_url = urljoin(base_domain, href) if not href.startswith("http") else href
                 
-                # 🚨 2. 校验协议合法性，确保非 javascript:void(0) 形式的恶意拼接
                 if full_url.startswith("http://") or full_url.startswith("https://"):
                     if not any(c['url'] == full_url for c in chapters):
                         chapters.append({"title": text, "url": full_url})
@@ -328,7 +316,7 @@ def fetch_youtube_transcript_backend(video_id, full_url=""):
         except Exception:
             pass
 
-    return False, "后端抓取受限（可能云端 IP 被 YouTube 封锁，请使用下方手机 CORS 代理）", "zh"
+    return False, "后端抓取受限", "zh"
 
 def detect_language(text):
     if not text or len(text.strip()) == 0:
@@ -354,7 +342,7 @@ def run_async_safe(coroutine):
             loop.close()
 
 # --------------------------------------------------
-# 4. 多功能输入层 (所有输入模式统一流经深度清洗引擎)
+# 4. 多功能输入层
 # --------------------------------------------------
 st.subheader("📥 导入阅读内容")
 input_mode = st.radio(
@@ -370,7 +358,7 @@ if input_mode == "✍️ 粘贴纯文本或单页网址(URL)":
     user_input = st.text_area(
         "粘贴文本或网页网址（以 http/https 开头）：",
         height=160,
-        placeholder="粘贴文章纯文本、单篇知乎/新闻链接、英文 TED 字幕、越南语/日文文本...\n提示：单次建议控制在 2000-15000 字以内，体验最流畅！",
+        placeholder="粘贴文章纯文本...",
     )
     if user_input.strip():
         text_candidate = user_input.strip()
@@ -382,10 +370,8 @@ if input_mode == "✍️ 粘贴纯文本或单页网址(URL)":
                         raw_text = clean_extracted_text(fetched)
                         st.success(f"🎉 网页解析成功！共提取到 {len(raw_text)} 个字符。")
                     else:
-                        st.warning("⚠️ 该网页设置了加密防爬，已为你恢复文本模式，请直接复制网页里的文字粘贴进来！")
                         raw_text = clean_extracted_text(user_input)
                 except Exception as e:
-                    st.warning(f"无法读取该网址正文: {e}，请直接复制文本粘贴输入。")
                     raw_text = clean_extracted_text(user_input)
         else:
             raw_text = clean_extracted_text(user_input)
@@ -413,7 +399,7 @@ elif input_mode == "📚 智能分章节整本听书 (目录网址)":
                             st.session_state.current_chapter_idx = 0
                             st.success(f"🎉 目录解析成功！共发现 {len(chapters)} 个有效章节。")
                         else:
-                            st.warning("未能在该网址中自动提取到有效的文字章节目录。如为有声电台网站（如蜻蜓FM），请直接复制代码文本播放。")
+                            st.warning("未能在该网址中自动提取到有效的文字章节目录。")
                     except Exception as e:
                         st.error(f"{e}")
             else:
@@ -452,18 +438,18 @@ elif input_mode == "📚 智能分章节整本听书 (目录网址)":
             try:
                 ch_fetched = fetch_text_from_url(current_ch_url)
                 raw_text = clean_extracted_text(ch_fetched)
-                st.info(f"✅ 本章加载成功，共 {len(raw_text)} 个字符。点击下方按钮即可一键听书或提炼！")
+                st.info(f"✅ 本章加载成功，共 {len(raw_text)} 个字符。")
                 detected_lang_code = detect_language(raw_text)
             except Exception as e:
                 raw_text = f"加载章节正文出错: {e}"
                 st.error(raw_text)
 
 elif input_mode == "🌐 粘贴 YouTube 视频链接":
-    yt_url = st.text_input("请输入 YouTube 视频网址：", placeholder="https://www.youtube.com/watch?v=... 或 https://youtu.be/...")
+    yt_url = st.text_input("请输入 YouTube 视频网址：", placeholder="https://www.youtube.com/watch?v=...")
     if yt_url.strip():
         video_id = extract_youtube_id(yt_url.strip())
         if video_id:
-            with st.spinner("🤖 正在尝试 Python 双核自动提取全球字幕..."):
+            with st.spinner("🤖 正在自动提取字幕..."):
                 success, yt_text, lang_code = fetch_youtube_transcript_backend(video_id, yt_url.strip())
             
             if success:
@@ -473,69 +459,6 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
                 st.text_area("📹 提取的字幕文本预览", raw_text, height=140)
             else:
                 st.warning(f"⚠️ {yt_text}")
-                st.markdown("#### 📱 备用方案：启动 CORS 跨域代理抓取")
-                js_code = f"""
-                <div style="font-family: system-ui, -apple-system, sans-serif; padding: 12px; background: #1e293b; border-radius: 10px; color: #fff;">
-                    <button id="fetchBtn" style="background: #2563eb; color: white; border: none; padding: 12px 18px; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; font-size: 15px;">
-                        ⚡ 启动手机 CORS 跨域代理抓取字幕
-                    </button>
-                    <div id="status" style="margin-top: 10px; font-size: 13px; color: #94a3b8; text-align: center;">准备就绪，点击上方按钮开始抓取</div>
-                    <textarea id="resultText" style="width: 100%; height: 110px; margin-top: 10px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-size: 13px; display: none;" readonly></textarea>
-                </div>
-                <script>
-                document.getElementById('fetchBtn').addEventListener('click', async () => {{
-                    const status = document.getElementById('status');
-                    const resultText = document.getElementById('resultText');
-                    const videoId = "{video_id}";
-                    status.innerText = "⏳ 正在连接 CORS 跨域代理抓取字幕...";
-                    status.style.color = "#fbbf24";
-                    const targetApi = `https://yt.lemnoslife.com/noKey/captions?videoId=${{videoId}}`;
-                    const proxies = [
-                        `https://api.allorigins.win/raw?url=${{encodeURIComponent(targetApi)}}`,
-                        `https://corsproxy.io/?${{encodeURIComponent(targetApi)}}`
-                    ];
-                    let fetchedText = "";
-                    for (let proxyUrl of proxies) {{
-                        try {{
-                            let response = await fetch(proxyUrl);
-                            if (response.ok) {{
-                                let data = await response.json();
-                                let tracks = data.subtitles || [];
-                                if (tracks.length > 0) {{
-                                    let trackUrl = tracks[0].baseUrl;
-                                    let xmlProxy = `https://api.allorigins.win/raw?url=${{encodeURIComponent(trackUrl)}}`;
-                                    let xmlRes = await fetch(xmlProxy);
-                                    let xmlText = await xmlRes.text();
-                                    let parser = new DOMParser();
-                                    let xmlDoc = parser.parseFromString(xmlText, "text/xml");
-                                    let textNodes = xmlDoc.getElementsByTagName("text");
-                                    let lines = [];
-                                    for (let i = 0; i < textNodes.length; i++) {{
-                                        let txt = textNodes[i].textContent.replace(/<[^>]+>/g, '').trim();
-                                        if (txt) lines.push(txt);
-                                    }}
-                                    fetchedText = lines.join('\\n');
-                                    if (fetchedText.length > 30) break;
-                                }}
-                            }}
-                        }} catch (e) {{}}
-                    }}
-                    if (fetchedText.length > 30) {{
-                        status.innerText = "✅ 抓取成功！已自动选中文本，复制后切到【粘贴纯文本】模式即可使用：";
-                        status.style.color = "#4ade80";
-                        resultText.value = fetchedText;
-                        resultText.style.display = "block";
-                        resultText.select();
-                    }} else {{
-                        status.innerText = "⚠️ 抓取失败：该视频作者未开启公开 CC 字幕（或字幕已被限制）。";
-                        status.style.color = "#f87171";
-                    }}
-                }});
-                </script>
-                """
-                st.components.v1.html(js_code, height=220)
-        else:
-            st.error("无效的 YouTube 链接，请检查网址格式。")
 
 else:
     uploaded_file = st.file_uploader("支持上传 .txt / .pdf / .docx / .epub 电子书文件", type=["txt", "pdf", "docx", "epub"])
@@ -561,22 +484,20 @@ else:
         if len(raw_text.strip()) > 0:
             st.success(f"🎉 成功导入并深度清洗文件，共提取到 {len(raw_text)} 个有效字符！")
             detected_lang_code = detect_language(raw_text)
-            with st.expander("📄 查看 / 编辑提取出的纯净文本（已自动过滤页码与杂音）", expanded=False):
+            with st.expander("📄 查看 / 编辑提取出的纯净文本", expanded=False):
                 raw_text = st.text_area("文本预览：", raw_text, height=180)
 
-# --------------------------------------------------
-# 大文件超长保护：自动章节切分流控选单
-# --------------------------------------------------
+# 大文件超长保护
 active_process_text = raw_text
 if len(raw_text) > 8000:
-    st.info("💡 检测到超长文件/图书，已为你自动激活【章节智能切片器】，避免一次性合成导致卡顿！")
+    st.info("💡 检测到超长文件/图书，已为你自动激活【章节智能切片器】！")
     auto_chapters = split_text_into_chapters(raw_text)
     chapter_names = [c["title"] for c in auto_chapters]
     selected_ch_idx = st.selectbox("📌 选择当前要合成或提炼的章节：", range(len(chapter_names)), format_func=lambda i: chapter_names[i])
     active_process_text = auto_chapters[selected_ch_idx]["content"]
 
 # --------------------------------------------------
-# 5. 微软 300+ 全球动态 AI 音色 + 倍速调节面板
+# 5. 音色与倍速设置
 # --------------------------------------------------
 LOCALE_LANG_MAP = {'zh-CN': ('中文普通话', 'Mandarin'), 'en-US': ('美式英语', 'US English'), 'ja-JP': ('日语', 'Japanese')}
 LOCALE_FLAGS = {'zh-CN': '🇨🇳', 'en-US': '🇺🇸', 'ja-JP': '🇯🇵'}
@@ -614,7 +535,7 @@ rate_percentage = int(round((speech_rate_val - 1.0) * 100))
 rate_str = f"{rate_percentage:+d}%"
 
 # --------------------------------------------------
-# 6. 🚀 高性能并发 TTS 合成 + MD5 缓存 + BGM 混音引擎
+# 6. TTS 合成 + MD5 缓存 + 修复版 BGM 混音引擎
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -648,7 +569,6 @@ def split_text_chunks_safe(text, max_chunk_size=800):
     return chunks if chunks else [text]
 
 async def synth_single_chunk_cached(chunk, voice, rate_str, sem):
-    """带 MD5 磁盘持久化缓存的单段并发合成"""
     chunk_hash = hashlib.md5(f"{chunk}_{voice}_{rate_str}".encode('utf-8')).hexdigest()
     cache_file = os.path.join(CACHE_DIR, f"{chunk_hash}.mp3")
     
@@ -689,7 +609,7 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem):
         return res_bytes
 
 def mix_bgm_with_audio(speech_bytes, volume_percent=15):
-    """广播剧级 BGM 混音器 (已适配根目录 gentle_bgm.mp3 读取)"""
+    """广播剧级 BGM 混音器（修复版：自动对齐采样率与声道，确保混音绝对生效）"""
     if not HAS_PYDUB or not speech_bytes:
         return speech_bytes
 
@@ -697,25 +617,29 @@ def mix_bgm_with_audio(speech_bytes, volume_percent=15):
         speech = AudioSegment.from_file(io.BytesIO(speech_bytes), format="mp3")
         speech_duration = len(speech)
 
-        # 检查根目录下是否有用户上传的专属 gentle_bgm.mp3
         bgm_path = os.path.join(BGM_DIR, "gentle_bgm.mp3")
         if not os.path.exists(bgm_path):
-            # 若未上传，自动生成柔和的双音和弦作为默认 BGM
+            # 生成丰满的 C大调三音和弦（根音261Hz、三音329Hz、五音392Hz），辨识度极高
             from pydub.generators import Sine
-            tone1 = Sine(220.0).to_audio_segment(duration=speech_duration + 2000).fade_in(1500).fade_out(1500)
-            tone2 = Sine(277.18).to_audio_segment(duration=speech_duration + 2000).fade_in(1500).fade_out(1500)
-            bgm = tone1.overlay(tone2) - 20
+            tone1 = Sine(261.63).to_audio_segment(duration=speech_duration + 2000)
+            tone2 = Sine(329.63).to_audio_segment(duration=speech_duration + 2000)
+            tone3 = Sine(392.00).to_audio_segment(duration=speech_duration + 2000)
+            bgm = tone1.overlay(tone2).overlay(tone3)
         else:
             bgm = AudioSegment.from_file(bgm_path, format="mp3")
+
+        # 🔑 关键修复：强制对齐采样率和声道，防止 pydub 混音静默失效
+        bgm = bgm.set_frame_rate(speech.frame_rate).set_channels(speech.channels)
 
         # 让 BGM 循环匹配人声长度
         if len(bgm) < speech_duration:
             loops_needed = (speech_duration // len(bgm)) + 1
             bgm = bgm * loops_needed
 
-        bgm = bgm[:speech_duration].fade_in(1500).fade_out(1500)
+        bgm = bgm[:speech_duration].fade_in(1000).fade_out(1000)
         
-        volume_db = -22 + (volume_percent * 0.5)
+        # 音量映射：当设置为 40% 时音量非常清晰
+        volume_db = -30 + (volume_percent * 0.7)
         bgm = bgm + volume_db
 
         mixed = speech.overlay(bgm)
@@ -725,18 +649,17 @@ def mix_bgm_with_audio(speech_bytes, volume_percent=15):
         st.toast("🎵 BGM 沉浸式背景音乐混音成功！", icon="🎧")
         return output_io.getvalue()
     except Exception as e:
-        st.error(f"❌ BGM 混音异常（FFmpeg/pydub 环境未就绪）: {e}")
+        st.error(f"❌ BGM 混音异常: {e}")
         return speech_bytes
 
 async def generate_audio_bytes_parallel(text, voice, rate_str="+0%", max_concurrency=10, apply_bgm=False, volume_pct=15):
-    """多线程并发语音合成 + 影音 BGM 混音"""
     clean_text = clean_markdown_for_speech(text)
     chunks = split_text_chunks_safe(clean_text)
     if not chunks:
         return b""
         
     sem = asyncio.Semaphore(max_concurrency)
-    progress_bar = st.progress(0, text=f"⚡ 正在启动 {max_concurrency} 线程并发合成 (共 {len(chunks)} 段)...")
+    progress_bar = st.progress(0, text=f"⚡ 正在启动 {max_concurrency} 线程并发合成...")
     
     async def worker(idx, chunk):
         data = await synth_single_chunk_cached(chunk, voice, rate_str, sem)
@@ -750,7 +673,7 @@ async def generate_audio_bytes_parallel(text, voice, rate_str="+0%", max_concurr
         idx, data = await f
         results[idx] = data
         completed += 1
-        progress_bar.progress(completed / len(chunks), text=f"⚡ 并发语音合成中/MD5缓存读取 ({completed}/{len(chunks)} 段)...")
+        progress_bar.progress(completed / len(chunks), text=f"⚡ 合成进度 ({completed}/{len(chunks)} 段)...")
 
     progress_bar.empty()
     full_audio = bytearray()
@@ -766,7 +689,7 @@ async def generate_audio_bytes_parallel(text, voice, rate_str="+0%", max_concurr
     return final_bytes
 
 # --------------------------------------------------
-# 7. 跨平台自适应字库引擎与金句卡片生成
+# 7. 字库与金句卡片
 # --------------------------------------------------
 @st.cache_resource
 def get_chinese_font(font_size=20):
@@ -848,7 +771,7 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     return img_byte_arr.getvalue()
 
 # --------------------------------------------------
-# 8. 全语种自适应知识提炼引擎
+# 8. 知识提炼引擎
 # --------------------------------------------------
 def clean_sentence_prefix(sentence):
     cleaned = sentence.strip()
@@ -922,7 +845,7 @@ def extract_ultimate_local_insights(text):
     return summary_md, top_one_sentence, keywords
 
 # --------------------------------------------------
-# 9. Session State 状态管理与操作区
+# 9. Session State 管理与操作区
 # --------------------------------------------------
 if "full_audio_bytes" not in st.session_state:
     st.session_state.full_audio_bytes = None
@@ -987,7 +910,7 @@ with col2:
                     st.success("🎉 深度提炼完成！")
 
 # --------------------------------------------------
-# 10. 结果展示区 (原汁原味展示面板)
+# 10. 结果展示区
 # --------------------------------------------------
 if st.session_state.full_audio_bytes:
     st.divider()
