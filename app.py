@@ -16,8 +16,17 @@ from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
 # --------------------------------------------------
-# 0. 环境与依赖严格诊断 (双重保险：系统 FFmpeg + Python 自动解压接管)
+# 0. 环境与依赖诊断 (自动注入 imageio-ffmpeg 到系统 PATH)
 # --------------------------------------------------
+# 强制将 imageio_ffmpeg 的二进制目录注入系统环境变量 PATH 中
+try:
+    import imageio_ffmpeg
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg_dir = os.path.dirname(ffmpeg_exe)
+    os.environ["PATH"] = ffmpeg_dir + os.path.pathsep + os.environ.get("PATH", "")
+except Exception:
+    pass
+
 HAS_PYDUB = False
 FFMPEG_READY = False
 FFMPEG_SOURCE = "未就绪"
@@ -29,23 +38,13 @@ except ImportError:
     pass
 
 if HAS_PYDUB:
-    # 优先方案 1：尝试通过 imageio_ffmpeg 自动绑定 Python 内置 FFmpeg 二进制
     try:
-        import imageio_ffmpeg
-        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        AudioSegment.converter = ffmpeg_exe
-        AudioSegment.ffprobe = ffmpeg_exe
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
         FFMPEG_READY = True
-        FFMPEG_SOURCE = "Python 自动解压引擎 (imageio-ffmpeg)"
+        FFMPEG_SOURCE = "FFmpeg 引擎已就绪"
     except Exception:
-        # 备选方案 2：检测 Linux 系统原生环境变量中的 ffmpeg
-        try:
-            subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            FFMPEG_READY = True
-            FFMPEG_SOURCE = "Linux 系统原生 (packages.txt)"
-        except Exception:
-            FFMPEG_READY = False
-            FFMPEG_SOURCE = "未检测到 FFmpeg"
+        FFMPEG_READY = False
+        FFMPEG_SOURCE = "未检测到 FFmpeg"
 
 CACHE_DIR = ".audio_cache"
 BGM_DIR = "."
