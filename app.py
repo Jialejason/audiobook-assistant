@@ -3,8 +3,11 @@ import io
 import json
 import os
 import re
+import hashlib
 import subprocess
 from urllib.parse import urljoin, urlparse
+from concurrent.futures import ThreadPoolExecutor
+
 import jieba
 import jieba.analyse
 import requests
@@ -14,7 +17,9 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
-# 尝试导入 python-docx 与 ebooklib (扩展电子书支持)
+# --------------------------------------------------
+# 0. 基础依赖库检测与磁盘缓存初始化
+# --------------------------------------------------
 try:
     import docx
     HAS_DOCX = True
@@ -28,7 +33,6 @@ try:
 except ImportError:
     HAS_EPUB = False
 
-# 尝试导入 youtube_transcript_api 与 yt_dlp
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
     HAS_YOUTUBE_API = True
@@ -41,272 +45,212 @@ try:
 except ImportError:
     HAS_YTDLP = False
 
-# 尝试导入 trafilatura（网页正文智能提取库）
 try:
     import trafilatura
     HAS_TRAFILATURA = True
 except ImportError:
     HAS_TRAFILATURA = False
 
+# MD5 缓存目录
+CACHE_DIR = ".audio_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+
 # --------------------------------------------------
-# 1. 页面基本配置
+# 1. 页面基本配置 (采用 wide 宽屏渲染工作区)
 # --------------------------------------------------
 st.set_page_config(
-    page_title="随身听书 & 思维助手 (全能旗舰版)", page_icon="🎧", layout="centered"
+    page_title="AI 全书助手 & 随身听书 (Ultimate Edition)",
+    page_icon="🎧",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-st.title("🎧 随身听书 & 思维助手 (Global Ultimate Edition)")
-st.caption(
-    "全能旗舰版：全源深度清洗引擎 + 300+ 中英双语 AI 音色 + 倍速调节 + 全格式电子书支持"
-)
+# --------------------------------------------------
+# 2. Session State 全局状态初始化
+# --------------------------------------------------
+if "loaded_text" not in st.session_state:
+    st.session_state.loaded_text = ""
+if "chapters" not in st.session_state:
+    st.session_state.chapters = []  # [{"title": str, "content": str}]
+if "selected_chapter_idx" not in st.session_state:
+    st.session_state.selected_chapter_idx = 0
+if "full_audio_bytes" not in st.session_state:
+    st.session_state.full_audio_bytes = None
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "local_summary" not in st.session_state:
+    st.session_state.local_summary = ""
+if "top_quote" not in st.session_state:
+    st.session_state.top_quote = ""
+if "current_keywords" not in st.session_state:
+    st.session_state.current_keywords = []
 
 # --------------------------------------------------
-# 2. 侧边栏：Ollama (Qwen) 大模型选配设置
-# --------------------------------------------------
-with st.sidebar:
-    st.header("⚙️ 引擎设置")
-    use_ollama = st.checkbox(
-        "🧠 启用 Ollama (Qwen) 本地大模型",
-        value=False,
-        help="未安装 Ollama 请勿勾选。换新电脑安装 Ollama 后勾选即可开启离线大模型提炼；若连接失败会自动无缝切回自适应算法。",
-    )
-    ollama_model = st.text_input(
-        "Ollama 模型名称:",
-        value="qwen2.5:1.5b",
-        help="需先在终端运行过: ollama run qwen2.5:1.5b",
-    )
-
-# --------------------------------------------------
-# 3. 核心：全源通用深度智能清洗引擎 (Universal Text Cleaner)
+# 3. 核心工具函数：深度清洗、自动分章与多线程 TTS 引擎
 # --------------------------------------------------
 def clean_extracted_text(text):
-    """
-    全源通用深度智能清洗引擎：
-    适用于 TXT / PDF / DOCX / EPUB / 网页正文 / YouTube 字幕 / 粘贴文本
-    彻底剔除：页码、连排跨页页码、印刷编码、版权黑名单、排版杂音、全角标点异化、非标点断行
-    """
+    """全源通用深度智能清洗引擎：彻底剔除页码、杂音与断句格式问题"""
     if not text:
         return ""
-    
-    # 1. 规范化非标准全角标点，修复 TTS 断句停顿怪异问题
     text = text.replace('﹗', '！').replace('﹖', '？').replace('......', '……')
-
     lines = text.split("\n")
     cleaned_lines = []
     
-    # 2. 繁简双语黑名单关键词（全面拦截机构版权、页眉页脚、推广杂音）
     noise_keywords = [
-        "家庭发展基金", "家庭發展基金", "ICAC", "廉政公署", "署政", 
-        "编者的话", "編者的話", "智多多大道理小故事", "智多多", 
-        "製作", "制作", "贊助", "赞助", "版权所有", "版權所有",
+        "家庭发展基金", "家庭發展基金", "ICAC", "廉政公署", "编者的话", "編者的話",
+        "智多多", "製作", "制作", "贊助", "赞助", "版权所有", "版權所有",
         "All rights reserved", "ISBN", "关注微信公众号", "点击上方蓝字"
     ]
-    
-    # 3. 垃圾占位符与孤立排版字符
     noise_symbols = {"M", "W", "NNN", "B", "FES", "0", "00", "000"}
-
-    # 4. 增强版正则：精准识别各种形态的页码、跨页连排页码、分数页码及印刷编码
     page_patterns = [
-        r'^\s*\d+(\s+\d+)*\s*$',         # 纯数字 "12" 以及双页码 "2 3", "4 5", "20 21"
-        r'^\s*-\s*\d+\s*-\s*$',         # 带横杠页码: "- 12 -"
-        r'^\s*第\s*\d+\s*[页頁]\s*$',     # 繁简中文页码: "第 12 页" / "第 12 頁"
-        r'^\s*Page\s*\d+\s*$',          # 英文页码: "Page 12"
-        r'^[A-Z0-9_\-]+/\d+.*$',        # 印刷出版批号: "J4345_04/10製作"
-        r'^\s*\d+\s*/\s*\d+\s*$',       # 分数型页码: "1/22"
+        r'^\s*\d+(\s+\d+)*\s*$',         # 纯数字/双页码
+        r'^\s*-\s*\d+\s*-\s*$',         # - 12 -
+        r'^\s*第\s*\d+\s*[页頁]\s*$',     # 第 12 页
+        r'^\s*Page\s*\d+\s*$',          # Page 12
+        r'^[A-Z0-9_\-]+/\d+.*$',        # 印刷编码
+        r'^\s*\d+\s*/\s*\d+\s*$',       # 分数页码
     ]
 
     for line in lines:
         l = line.strip()
-        
-        # 过滤空行与孤立占位符
         if not l or l in noise_symbols:
             continue
-            
-        # 匹配并过滤页码与印刷代码
         is_noise = False
         for pattern in page_patterns:
             if re.match(pattern, l, re.IGNORECASE):
                 is_noise = True
                 break
-        if is_noise:
+        if is_noise or any(kw in l for kw in noise_keywords):
             continue
-            
-        # 过滤黑名单关键词
-        if any(kw in l for kw in noise_keywords):
-            continue
-            
         cleaned_lines.append(l)
 
     full_text = "\n".join(cleaned_lines)
-    # 5. 修复被版面强行截断的句中换行（非标点符号结尾的换行连起来）
     full_text = re.sub(r'([^。！？!？…\n])\n([^。！？!？…\n])', r'\1\2', full_text)
     return full_text.strip()
 
-def parse_youtube_subtitle_text(raw_str):
-    """智能解析 JSON3 / VTT / XML 格式的原始字幕流，解析并提炼纯净文字"""
-    try:
-        sub_data = json.loads(raw_str)
-        if "events" in sub_data:
-            lines = []
-            for event in sub_data["events"]:
-                if "segs" in event:
-                    seg_text = "".join([s.get("utf8", "") for s in event["segs"]])
-                    seg_text = seg_text.replace("\n", " ").strip()
-                    if seg_text:
-                        lines.append(seg_text)
-            if lines:
-                return " ".join(lines)
-    except Exception:
-        pass
+def split_text_into_chapters(full_text):
+    """根据大文本中的章节标题进行自动正则拆分"""
+    if not full_text:
+        return []
+    pattern = r'(?=\n\s*(?:第[0-9一二三四五六七八九十百千]+[章卷节部]|Chapter\s+\d+|【第.*章】))'
+    parts = re.split(pattern, full_text)
+    chapters = []
+    
+    for i, p in enumerate(parts):
+        p_str = p.strip()
+        if not p_str:
+            continue
+        first_line = p_str.split('\n')[0].strip()
+        title = first_line[:30] if len(first_line) <= 35 else f"第 {i+1} 部分 ({first_line[:12]}...)"
+        chapters.append({"title": title, "content": p_str})
+        
+    if not chapters:
+        chapters = [{"title": "全文内容", "content": full_text}]
+    return chapters
 
-    clean_text = re.sub(r'<[^>]+>', '', raw_str)
-    clean_text = re.sub(r'\d{2}:\d{2}:\d{2}\.\d{3}.*?\n', '', clean_text)
-    lines = [
-        line.strip() 
-        for line in clean_text.split('\n') 
-        if line.strip() and not line.strip().isdigit() and not line.startswith('{')
-    ]
-    return " ".join(lines[:500])
+def clean_markdown_for_speech(text):
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"`(.*?)`", r"\1", text)
+    text = re.sub(r"#+\s*", "", text)
+    text = re.sub(r"^[•\-\*]\s*", "", text, flags=re.MULTILINE)
+    emoji_pattern = re.compile(
+        "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002300-\U000023FF\U00002b00-\U00002bff]+",
+        flags=re.UNICODE,
+    )
+    return emoji_pattern.sub("", text).strip()
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def fetch_text_from_url(url):
-    if HAS_TRAFILATURA:
+def split_text_chunks_safe(text, max_chunk_size=800):
+    raw_sentences = re.split(r'([。！!?？\n])', text)
+    chunks, current_chunk = [], ""
+    i = 0
+    while i < len(raw_sentences):
+        segment = raw_sentences[i]
+        if i + 1 < len(raw_sentences) and raw_sentences[i+1] in "。！!?？\n":
+            segment += raw_sentences[i+1]
+            i += 2
+        else:
+            i += 1
+        if not segment.strip():
+            continue
+        if len(current_chunk) + len(segment) <= max_chunk_size:
+            current_chunk += segment
+        else:
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+            current_chunk = segment
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    return chunks if chunks else [text]
+
+# --- 🚀 核心优化：MD5 缓存 + Asyncio 10 线程并发 TTS 合成 ---
+async def synth_chunk_cached(chunk, voice, rate_str, sem):
+    """带 MD5 磁盘持久化缓存的单段合成"""
+    chunk_hash = hashlib.md5(f"{chunk}_{voice}_{rate_str}".encode('utf-8')).hexdigest()
+    cache_file = os.path.join(CACHE_DIR, f"{chunk_hash}.mp3")
+    
+    # 命中缓存直接从磁盘读取
+    if os.path.exists(cache_file):
+        with open(cache_file, "rb") as f:
+            return f.read()
+            
+    async with sem:
+        audio_data = bytearray()
         try:
-            downloaded = trafilatura.fetch_url(url)
-            if downloaded:
-                result = trafilatura.extract(downloaded, include_comments=False, include_tables=True)
-                if result and len(result.strip()) > 30:
-                    return result.strip()
+            communicate = edge_tts.Communicate(chunk, voice, rate=rate_str)
+            async for item in communicate.stream():
+                if item["type"] == "audio":
+                    audio_data.extend(item["data"])
         except Exception:
             pass
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=12)
-        response.encoding = response.apparent_encoding
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        for element in soup(["script", "style", "header", "footer", "nav", "aside"]):
-            element.extract()
-
-        paragraphs = soup.find_all(["p", "article", "h1", "h2", "h3", "section"])
-        extracted_text = "\n".join([p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 10])
-        
-        if len(extracted_text) < 50:
-            extracted_text = soup.get_text().strip()
-
-        extracted_text = re.sub(r"\n\s*\n", "\n", extracted_text)
-        return extracted_text
-    except Exception as e:
-        raise Exception(f"网页抓取失败: {e}")
-
-def parse_book_catalog(catalog_url):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-    try:
-        res = requests.get(catalog_url, headers=headers, timeout=12)
-        res.encoding = res.apparent_encoding
-        soup = BeautifulSoup(res.text, "html.parser")
-        
-        parsed_url = urlparse(catalog_url)
-        base_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
-        
-        chapters = []
-        for a in soup.find_all("a", href=True):
-            text = a.get_text().strip()
-            href = a['href']
-            if text and (("第" in text and "章" in text) or len(text) < 30):
-                if any(kw in text for kw in ["首页", "书架", "登录", "目录", "作者", "意见", "关于", "上一页", "下一页", "尾页", "排行榜"]):
-                    continue
-                full_url = urljoin(base_domain, href) if not href.startswith("http") else href
-                if not any(c['url'] == full_url for c in chapters):
-                    chapters.append({"title": text, "url": full_url})
-        return chapters
-    except Exception as e:
-        raise Exception(f"解析书本目录失败: {e}")
-
-def extract_youtube_id(url):
-    patterns = [
-        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
-        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
-@st.cache_data(show_spinner=False, ttl=1800)
-def fetch_youtube_transcript_backend(video_id, full_url=""):
-    preferred_langs = ['zh-Hans', 'zh-Hant', 'zh', 'en', 'ja', 'es', 'de', 'fr', 'ko', 'vi', 'th', 'ru']
-
-    if HAS_YOUTUBE_API:
-        try:
-            data = YouTubeTranscriptApi.get_transcript(video_id, languages=preferred_langs)
-            full_text = " ".join([item['text'] for item in data])
-            return True, full_text, "auto"
-        except Exception:
+            
+        if len(audio_data) == 0:
+            fallback = "zh-CN-XiaoxiaoNeural" if re.search(r'[\u4e00-\u9fa5]', chunk) else "en-US-AvaMultilingualNeural"
             try:
-                data = YouTubeTranscriptApi.get_transcript(video_id)
-                full_text = " ".join([item['text'] for item in data])
-                return True, full_text, "auto"
+                communicate = edge_tts.Communicate(chunk, fallback, rate=rate_str)
+                async for item in communicate.stream():
+                    if item["type"] == "audio":
+                        audio_data.extend(item["data"])
             except Exception:
                 pass
+                
+        res_bytes = bytes(audio_data)
+        if len(res_bytes) > 0:
+            try:
+                with open(cache_file, "wb") as f:
+                    f.write(res_bytes)
+            except Exception:
+                pass
+        return res_bytes
 
-    if HAS_YTDLP and full_url:
-        try:
-            ydl_opts = {
-                'skip_download': True,
-                'writesubtitles': True,
-                'writeautomaticsub': True,
-                'subtitleslangs': preferred_langs,
-                'quiet': True,
-                'no_warnings': True,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(full_url, download=False)
-                subtitles = info.get('subtitles') or info.get('automatic_captions')
-                if subtitles:
-                    lang_key = next(iter(subtitles))
-                    sub_data = subtitles[lang_key]
-                    json_sub = [s for s in sub_data if s.get('ext') in ['json3', 'srv1', 'vtt']]
-                    if json_sub:
-                        res = requests.get(json_sub[0]['url'], timeout=10)
-                        if res.status_code == 200:
-                            clean_text = parse_youtube_subtitle_text(res.text)
-                            if len(clean_text) > 30:
-                                return True, clean_text, lang_key
-        except Exception:
-            pass
+async def generate_audio_bytes_parallel(text, voice, rate_str, max_concurrency=10):
+    """多线程并发高效合成整个章节"""
+    clean_text = clean_markdown_for_speech(text)
+    chunks = split_text_chunks_safe(clean_text)
+    sem = asyncio.Semaphore(max_concurrency)
+    
+    progress_bar = st.progress(0, text=f"⚡ 正在启动 {max_concurrency} 线程并发合成 (共 {len(chunks)} 段)...")
+    
+    async def worker(idx, chunk):
+        data = await synth_chunk_cached(chunk, voice, rate_str, sem)
+        return idx, data
 
-    return False, "后端抓取受限（可能云端 IP 被 YouTube 封锁，请使用下方手机 CORS 代理）", "zh"
-
-def detect_language(text):
-    if not text or len(text.strip()) == 0:
-        return 'zh'
-    if re.search(r'[\u4e00-\u9fa5]', text):
-        return 'zh'
-    elif re.search(r'[\u3040-\u30ff]', text):
-        return 'ja'
-    elif re.search(r'[\uac00-\ud7af]', text):
-        return 'ko'
-    elif re.search(r'[\u0e00-\u0e7f]', text):
-        return 'th'
-    elif re.search(r'[\u0400-\u04ff]', text):
-        return 'ru'
-    elif re.search(r'[\u0600-\u06ff]', text):
-        return 'ar'
-    elif re.search(r'[àáâãèéêìíòóôõùúýăđĩũơưàáảẽạâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳỵỷỹ]', text, re.IGNORECASE):
-        return 'vi'
-    else:
-        return 'en'
+    tasks = [worker(i, c) for i, c in enumerate(chunks)]
+    completed = 0
+    results = [None] * len(chunks)
+    
+    for f in asyncio.as_completed(tasks):
+        idx, data = await f
+        results[idx] = data
+        completed += 1
+        progress_bar.progress(completed / len(chunks), text=f"⚡ 已并发完成 {completed}/{len(chunks)} 段 (命中 MD5 缓存即刻秒刷)...")
+        
+    progress_bar.empty()
+    
+    full_audio = bytearray()
+    for r in results:
+        if r:
+            full_audio.extend(r)
+    return bytes(full_audio)
 
 def run_async_safe(coroutine):
     try:
@@ -320,540 +264,84 @@ def run_async_safe(coroutine):
             loop.close()
 
 # --------------------------------------------------
-# 4. 多功能输入层 (所有输入模式统一流经深度清洗引擎)
+# 4. 网页抓取、YouTube与数据提取辅助函数
 # --------------------------------------------------
-st.subheader("📥 导入阅读内容")
-input_mode = st.radio(
-    "选择输入方式：",
-    ["✍️ 粘贴纯文本或单页网址(URL)", "📚 智能分章节整本听书 (目录网址)", "🌐 粘贴 YouTube 视频链接", "📁 上传文件 (.txt / .pdf / .docx / .epub)"],
-    horizontal=True,
-)
-
-raw_text = ""
-detected_lang_code = "zh"
-
-if input_mode == "✍️ 粘贴纯文本或单页网址(URL)":
-    user_input = st.text_area(
-        "粘贴文本或网页网址（以 http/https 开头）：",
-        height=160,
-        placeholder="粘贴文章纯文本、单篇知乎/新闻链接、英文 TED 字幕、越南语/日文文本...\n提示：单次建议控制在 2000-15000 字以内，体验最流畅！",
-    )
-    if user_input.strip():
-        text_candidate = user_input.strip()
-        if text_candidate.startswith("http://") or text_candidate.startswith("https://"):
-            with st.spinner("🔗 正在通过智能解析引擎提取正文..."):
-                try:
-                    fetched = fetch_text_from_url(text_candidate)
-                    if len(fetched) > 50 and not fetched.startswith("http"):
-                        raw_text = clean_extracted_text(fetched)
-                        st.success(f"🎉 网页解析成功！共提取到 {len(raw_text)} 个字符。")
-                    else:
-                        st.warning("⚠️ 该网页设置了加密防爬，已为你恢复文本模式，请直接复制网页里的文字粘贴进来！")
-                        raw_text = clean_extracted_text(user_input)
-                except Exception as e:
-                    st.warning(f"无法读取该网址正文: {e}，请直接复制文本粘贴输入。")
-                    raw_text = clean_extracted_text(user_input)
-        else:
-            raw_text = clean_extracted_text(user_input)
-        detected_lang_code = detect_language(raw_text)
-
-elif input_mode == "📚 智能分章节整本听书 (目录网址)":
-    st.caption("🤖 AI 听书助理模式：输入整本书或小说的目录页网址，自动切章节并支持连续播放下一章！")
-    
-    if "book_chapters" not in st.session_state:
-        st.session_state.book_chapters = []
-    if "current_chapter_idx" not in st.session_state:
-        st.session_state.current_chapter_idx = 0
-
-    catalog_url = st.text_input(
-        "请输入书籍目录页网址：",
-        placeholder="https://www.example.com/book/12345/"
-    )
-    
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        if st.button("📚 解析全书目录", use_container_width=True):
-            if catalog_url.strip():
-                with st.spinner("正在解析全书章节目录，请稍候..."):
-                    try:
-                        chapters = parse_book_catalog(catalog_url.strip())
-                        if chapters:
-                            st.session_state.book_chapters = chapters
-                            st.session_state.current_chapter_idx = 0
-                            st.success(f"🎉 目录解析成功！共发现 {len(chapters)} 个章节。")
-                        else:
-                            st.warning("未能在该网址中自动提取到章节目录，请尝试换一个源或直接使用单页网址。")
-                    except Exception as e:
-                        st.error(f"{e}")
-            else:
-                st.warning("请输入有效的目录网址！")
-
-    with col_btn2:
-        if st.button("🗑️ 清空目录重置", use_container_width=True):
-            st.session_state.book_chapters = []
-            st.session_state.current_chapter_idx = 0
-            st.rerun()
-
-    if st.session_state.book_chapters:
-        chapters = st.session_state.book_chapters
-        idx = st.session_state.current_chapter_idx
-        total = len(chapters)
-
-        st.markdown("---")
-        st.markdown(f"📖 **当前导读进度**：第 **{idx + 1}** 章 / 共 **{total}** 章")
-
-        col_prev, col_info, col_next = st.columns([1, 2, 1])
-        with col_prev:
-            if st.button("◀️ 上一章", use_container_width=True, disabled=(idx <= 0)):
-                st.session_state.current_chapter_idx -= 1
-                st.session_state.full_audio_bytes = None
-                st.rerun()
-        with col_info:
-            st.markdown(f"<div style='text-align:center; font-weight:bold; color:#38bdf8; margin-top:5px;'>{chapters[idx]['title']}</div>", unsafe_allow_html=True)
-        with col_next:
-            if st.button("▶️ 下一章", use_container_width=True, disabled=(idx >= total - 1)):
-                st.session_state.current_chapter_idx += 1
-                st.session_state.full_audio_bytes = None
-                st.rerun()
-
-        current_ch_url = chapters[idx]['url']
-        with st.spinner(f"正在加载【{chapters[idx]['title']}】正文内容..."):
-            try:
-                ch_fetched = fetch_text_from_url(current_ch_url)
-                raw_text = clean_extracted_text(ch_fetched)
-                st.info(f"✅ 本章加载成功，共 {len(raw_text)} 个字符。点击下方按钮即可一键听书或提炼！")
-                detected_lang_code = detect_language(raw_text)
-            except Exception as e:
-                raw_text = f"加载章节正文出错: {e}"
-                st.error(raw_text)
-
-elif input_mode == "🌐 粘贴 YouTube 视频链接":
-    yt_url = st.text_input(
-        "请输入 YouTube 视频网址：",
-        placeholder="https://www.youtube.com/watch?v=... 或 https://youtu.be/..."
-    )
-    if yt_url.strip():
-        video_id = extract_youtube_id(yt_url.strip())
-        if video_id:
-            with st.spinner("🤖 正在尝试 Python 双核自动提取全球字幕..."):
-                success, yt_text, lang_code = fetch_youtube_transcript_backend(video_id, yt_url.strip())
-            
-            if success:
-                raw_text = clean_extracted_text(yt_text)
-                detected_lang_code = detect_language(raw_text)
-                st.success(f"🎉 字幕抓取成功！共提取到 {len(raw_text)} 个字符。")
-                st.text_area("📹 提取的字幕文本预览", raw_text, height=140)
-            else:
-                st.warning(f"⚠️ {yt_text}")
-                st.markdown("#### 📱 备用方案：启动 CORS 跨域代理抓取")
-                st.caption("如果后端云端 IP 被限制，可点击下方按钮使用手机本地网络抓取字幕：")
-                
-                js_code = f"""
-                <div style="font-family: system-ui, -apple-system, sans-serif; padding: 12px; background: #1e293b; border-radius: 10px; color: #fff;">
-                    <button id="fetchBtn" style="background: #2563eb; color: white; border: none; padding: 12px 18px; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; font-size: 15px;">
-                        ⚡ 启动手机 CORS 跨域代理抓取字幕
-                    </button>
-                    <div id="status" style="margin-top: 10px; font-size: 13px; color: #94a3b8; text-align: center;">准备就绪，点击上方按钮开始抓取</div>
-                    <textarea id="resultText" style="width: 100%; height: 110px; margin-top: 10px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-size: 13px; display: none;" readonly></textarea>
-                </div>
-
-                <script>
-                document.getElementById('fetchBtn').addEventListener('click', async () => {{
-                    const status = document.getElementById('status');
-                    const resultText = document.getElementById('resultText');
-                    const videoId = "{video_id}";
-                    
-                    status.innerText = "⏳ 正在连接 CORS 跨域代理抓取字幕...";
-                    status.style.color = "#fbbf24";
-
-                    const targetApi = `https://yt.lemnoslife.com/noKey/captions?videoId=${{videoId}}`;
-                    const proxies = [
-                        `https://api.allorigins.win/raw?url=${{encodeURIComponent(targetApi)}}`,
-                        `https://corsproxy.io/?${{encodeURIComponent(targetApi)}}`
-                    ];
-
-                    let fetchedText = "";
-
-                    for (let proxyUrl of proxies) {{
-                        try {{
-                            let response = await fetch(proxyUrl);
-                            if (response.ok) {{
-                                let data = await response.json();
-                                let tracks = data.subtitles || [];
-                                if (tracks.length > 0) {{
-                                    let trackUrl = tracks[0].baseUrl;
-                                    let xmlProxy = `https://api.allorigins.win/raw?url=${{encodeURIComponent(trackUrl)}}`;
-                                    let xmlRes = await fetch(xmlProxy);
-                                    let xmlText = await xmlRes.text();
-                                    
-                                    let parser = new DOMParser();
-                                    let xmlDoc = parser.parseFromString(xmlText, "text/xml");
-                                    let textNodes = xmlDoc.getElementsByTagName("text");
-                                    
-                                    let lines = [];
-                                    for (let i = 0; i < textNodes.length; i++) {{
-                                        let txt = textNodes[i].textContent.replace(/<[^>]+>/g, '').trim();
-                                        if (txt) lines.push(txt);
-                                    }}
-                                    fetchedText = lines.join('\\n');
-                                    if (fetchedText.length > 30) break;
-                                }}
-                            }}
-                        }} catch (e) {{}}
-                    }}
-
-                    if (fetchedText.length > 30) {{
-                        status.innerText = "✅ 抓取成功！已自动选中文本，复制后切到【粘贴纯文本】模式即可使用：";
-                        status.style.color = "#4ade80";
-                        resultText.value = fetchedText;
-                        resultText.style.display = "block";
-                        resultText.select();
-                    }} else {{
-                        status.innerText = "⚠️ 抓取失败：该视频作者未开启公开 CC 字幕（或字幕已被限制）。";
-                        status.style.color = "#f87171";
-                    }}
-                }});
-                </script>
-                """
-                st.components.v1.html(js_code, height=220)
-        else:
-            st.error("无效的 YouTube 链接，请检查网址格式。")
-
-else:
-    uploaded_file = st.file_uploader(
-        "支持上传 .txt / .pdf / .docx / .epub 电子书文件", type=["txt", "pdf", "docx", "epub"]
-    )
-    if uploaded_file is not None:
-        filename = uploaded_file.name.lower()
-        extracted_raw = ""
-        
-        if filename.endswith(".txt"):
-            extracted_raw = uploaded_file.read().decode("utf-8", errors="ignore")
-        elif filename.endswith(".pdf"):
-            pdf_reader = PdfReader(uploaded_file)
-            extracted_pages = []
-            for page in pdf_reader.pages:
-                text_page = page.extract_text()
-                if text_page:
-                    extracted_pages.append(text_page)
-            extracted_raw = "\n".join(extracted_pages)
-        elif filename.endswith(".docx"):
-            if HAS_DOCX:
-                doc = docx.Document(uploaded_file)
-                extracted_raw = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-            else:
-                st.error("未安装 python-docx 依赖！请在终端运行: pip install python-docx")
-        elif filename.endswith(".epub"):
-            if HAS_EPUB:
-                book = epub.read_epub(io.BytesIO(uploaded_file.read()))
-                texts = []
-                for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
-                    soup = BeautifulSoup(item.get_content(), 'html.parser')
-                    texts.append(soup.get_text())
-                extracted_raw = "\n".join(texts)
-            else:
-                st.error("未安装 ebooklib 依赖！请在终端运行: pip install ebooklib")
-
-        # 核心：上传的 .txt / .pdf / .docx / .epub 全面统一通过深度清洗引擎
-        raw_text = clean_extracted_text(extracted_raw)
-        
-        if len(raw_text.strip()) > 0:
-            st.success(f"🎉 成功导入并深度清洗文件，共提取到 {len(raw_text)} 个有效字符！")
-            detected_lang_code = detect_language(raw_text)
-            
-            with st.expander("📄 查看 / 编辑提取出的纯净文本（已自动过滤页码与杂音）", expanded=False):
-                raw_text = st.text_area("文本预览：", raw_text, height=180)
-        else:
-            st.error("⚠️ 无法从该文件中提取有效文本（可能是纯图片扫描版 PDF 或文件损坏）。")
-
-# --------------------------------------------------
-# 5. 微软 300+ 全球动态 AI 音色 + 倍速调节面板
-# --------------------------------------------------
-LOCALE_LANG_MAP = {
-    'zh-CN': ('中文普通话', 'Mandarin'),
-    'zh-HK': ('粤语/香港', 'Cantonese'),
-    'zh-TW': ('台湾中文', 'Taiwanese'),
-    'en-US': ('美式英语', 'US English'),
-    'en-GB': ('英式英语', 'UK English'),
-    'en-AU': ('澳洲英语', 'AU English'),
-    'en-IN': ('印度英语', 'Indian English'),
-    'ja-JP': ('日语', 'Japanese'),
-    'ko-KR': ('韩语', 'Korean'),
-    'vi-VN': ('越南语', 'Vietnamese'),
-    'th-TH': ('泰语', 'Thai'),
-    'ms-MY': ('马来语', 'Malay'),
-    'id-ID': ('印尼语', 'Indonesian'),
-    'jv-ID': ('爪哇语', 'Javanese'),
-    'su-ID': ('巽他语', 'Sundanese'),
-    'es-ES': ('西班牙语', 'Spanish'),
-    'es-MX': ('墨西哥西语', 'Mexican Spanish'),
-    'fr-FR': ('法语', 'French'),
-    'de-DE': ('德语', 'German'),
-    'it-IT': ('意大利语', 'Italian'),
-    'ru-RU': ('俄语', 'Russian'),
-    'ar-SA': ('阿拉伯语', 'Arabic'),
-    'hi-IN': ('印地语', 'Hindi'),
-    'kn-IN': ('卡纳达语', 'Kannada'),
-    'ta-IN': ('泰米尔语', 'Tamil'),
-    'te-IN': ('泰卢固语', 'Telugu'),
-    'pt-BR': ('巴西葡语', 'Portuguese'),
-    'nl-NL': ('荷兰语', 'Dutch'),
-    'tr-TR': ('土耳其语', 'Turkish'),
-    'pl-PL': ('波兰语', 'Polish'),
-    'uk-UA': ('乌克兰语', 'Ukrainian'),
-}
-
-LOCALE_FLAGS = {
-    'zh-CN': '🇨🇳', 'zh-HK': '🇭🇰', 'zh-TW': '🇹🇼', 'en-US': '🇺🇸', 'en-GB': '🇬🇧',
-    'en-AU': '🇦🇺', 'en-CA': '🇨🇦', 'en-IN': '🇮🇳', 'ja-JP': '🇯🇵', 'ko-KR': '🇰🇷',
-    'es-ES': '🇪🇸', 'es-MX': '🇲🇽', 'fr-FR': '🇫🇷', 'de-DE': '🇩🇪', 'it-IT': '🇮🇹',
-    'ru-RU': '🇷🇺', 'vi-VN': '🇻🇳', 'th-TH': '🇹🇭', 'ms-MY': '🇲🇾', 'id-ID': '🇮🇩',
-    'ar-SA': '🇸🇦', 'hi-IN': '🇮🇳', 'pt-BR': '🇧🇷', 'nl-NL': '🇳🇱', 'jv-ID': '🇮🇩',
-    'kn-IN': '🇮🇳', 'tr-TR': '🇹🇷', 'pl-PL': '🇵🇱', 'uk-UA': '🇺🇦'
-}
-
-@st.cache_resource
-def fetch_all_global_voices():
-    try:
-        voices = run_async_safe(edge_tts.list_voices())
-        voice_dict = {}
-        for v in voices:
-            short_name = v.get("ShortName", "")
-            locale = v.get("Locale", "")
-            gender = "👩" if v.get("Gender") == "Female" else "👨"
-            
-            flag = LOCALE_FLAGS.get(locale, "🌍")
-            
-            if locale in LOCALE_LANG_MAP:
-                zh_name, en_name = LOCALE_LANG_MAP[locale]
-                lang_str = f"{zh_name} | {en_name}"
-            else:
-                lang_str = locale
-            
-            name_parts = short_name.split("-")
-            voice_name = name_parts[-1].replace("Neural", "") if len(name_parts) >= 3 else short_name
-            
-            display = f"{flag} [{lang_str}] {voice_name} ({gender})"
-            voice_dict[short_name] = display
-        return voice_dict
-    except Exception:
-        return {
-            "zh-CN-XiaoxiaoNeural": "🇨🇳 [中文普通话 | Mandarin] Xiaoxiao (👩)",
-            "zh-CN-YunxiNeural": "🎙️ [中文普通话 | Mandarin] Yunxi (👨)",
-            "en-US-AvaMultilingualNeural": "🌐 [美式英语 | US English] AvaMultilingual (👩)",
-            "en-US-JennyNeural": "🇺🇸 [美式英语 | US English] Jenny (👩)",
-            "en-GB-SoniaNeural": "🇬🇧 [英式英语 | UK English] Sonia (👩)",
-            "ja-JP-NanamiNeural": "🇯🇵 [日语 | Japanese] Nanami (👩)",
-            "ko-KR-SunHiNeural": "🇰🇷 [韩语 | Korean] SunHi (👩)",
-            "vi-VN-HoaiMyNeural": "🇻🇳 [越南语 | Vietnamese] HoaiMy (👩)",
-            "es-ES-XimenaMultilingualNeural": "🇪🇸 [西班牙语 | Spanish] XimenaMultilingual (👩)",
-        }
-
-GLOBAL_VOICES = fetch_all_global_voices()
-voice_keys = list(GLOBAL_VOICES.keys())
-
-def calc_default_voice_index(lang_code, keys):
-    lang_code_low = lang_code.lower()
-    if lang_code_low == 'zh':
-        for i, k in enumerate(keys):
-            if 'zh-cn-xiaoxiaoneural' in k.lower():
-                return i
-    for i, k in enumerate(keys):
-        if f"-{lang_code_low}" in k.lower() or f"{lang_code_low}-" in k.lower():
-            return i
-    return 0
-
-default_idx = calc_default_voice_index(detected_lang_code, voice_keys)
-
-# 音色与语速属性面板
-st.markdown("##### 🎛️ 音频播放属性设置")
-speech_col1, speech_col2 = st.columns([2, 1])
-
-with speech_col1:
-    voice_option = st.selectbox(
-        "选择朗读音色（已自动推荐最佳音色）：",
-        options=voice_keys,
-        index=default_idx,
-        format_func=lambda x: GLOBAL_VOICES[x],
-    )
-
-with speech_col2:
-    speech_rate_val = st.slider(
-        "⚡ 播放语速：",
-        min_value=0.5,
-        max_value=2.0,
-        value=1.0,
-        step=0.1,
-        format="%.1fx",
-        help="支持 0.5x 慢速精听 到 2.0x 快速听书"
-    )
-
-rate_percentage = int(round((speech_rate_val - 1.0) * 100))
-rate_str = f"{rate_percentage:+d}%"
-
-# --------------------------------------------------
-# 6. 纯净语音与安全切片引擎 (含进度条与倍速合成)
-# --------------------------------------------------
-def clean_markdown_for_speech(text):
-    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
-    text = re.sub(r"`(.*?)`", r"\1", text)
-    text = re.sub(r"#+\s*", "", text)
-    text = re.sub(r"^[•\-\*]\s*", "", text, flags=re.MULTILINE)
-
-    emoji_pattern = re.compile(
-        "["
-        "\U0001F000-\U0001FAFF"
-        "\U00002600-\U000027BF"
-        "\U00002300-\U000023FF"
-        "\U00002b00-\U00002bff"
-        "\U0000fe00-\U0000fe0f"
-        "]+",
-        flags=re.UNICODE,
-    )
-    text = emoji_pattern.sub("", text)
-    text = re.sub(r"\n\s*\n", "\n", text)
-    return text.strip()
-
-def split_text_chunks_safe(text, max_chunk_size=800):
-    raw_sentences = re.split(r'([。！!?？\n])', text)
-    chunks = []
-    current_chunk = ""
-
-    i = 0
-    while i < len(raw_sentences):
-        segment = raw_sentences[i]
-        if i + 1 < len(raw_sentences) and raw_sentences[i+1] in "。！!?？\n":
-            segment += raw_sentences[i+1]
-            i += 2
-        else:
-            i += 1
-            
-        if not segment.strip():
-            continue
-
-        if len(current_chunk) + len(segment) <= max_chunk_size:
-            current_chunk += segment
-        else:
-            if current_chunk.strip():
-                chunks.append(current_chunk.strip())
-            current_chunk = segment
-
-    if current_chunk.strip():
-        chunks.append(current_chunk.strip())
-
-    return chunks if chunks else [text]
-
-async def synth_single_chunk(chunk, voice, rate_str="+0%"):
-    audio_data = bytearray()
-    try:
-        communicate = edge_tts.Communicate(chunk, voice, rate=rate_str)
-        async for item in communicate.stream():
-            if item["type"] == "audio":
-                audio_data.extend(item["data"])
-    except Exception:
-        pass
-    
-    if len(audio_data) == 0:
-        fallback_voice = "zh-CN-XiaoxiaoNeural" if re.search(r'[\u4e00-\u9fa5]', chunk) else "en-US-AvaMultilingualNeural"
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_text_from_url(url):
+    if HAS_TRAFILATURA:
         try:
-            communicate = edge_tts.Communicate(chunk, fallback_voice, rate=rate_str)
-            async for item in communicate.stream():
-                if item["type"] == "audio":
-                    audio_data.extend(item["data"])
+            downloaded = trafilatura.fetch_url(url)
+            if downloaded:
+                res = trafilatura.extract(downloaded, include_comments=False, include_tables=True)
+                if res and len(res.strip()) > 30:
+                    return res.strip()
         except Exception:
             pass
-            
-    return audio_data
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"}
+    try:
+        response = requests.get(url, headers=headers, timeout=12)
+        response.encoding = response.apparent_encoding
+        soup = BeautifulSoup(response.text, "html.parser")
+        for el in soup(["script", "style", "header", "footer", "nav", "aside"]):
+            el.extract()
+        paragraphs = soup.find_all(["p", "article", "h1", "h2", "h3", "section"])
+        text = "\n".join([p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 10])
+        return text if len(text) >= 50 else soup.get_text().strip()
+    except Exception as e:
+        raise Exception(f"网页抓取失败: {e}")
 
-async def generate_audio_bytes_safe(text, voice, rate_str="+0%"):
-    clean_text = clean_markdown_for_speech(text)
-    chunks = split_text_chunks_safe(clean_text)
-    
-    full_audio = bytearray()
-    progress_bar = st.progress(0, text="🎙️ 正在逐段合成高保真语音...")
-    
-    for i, chunk in enumerate(chunks):
-        res = await synth_single_chunk(chunk, voice, rate_str)
-        full_audio.extend(res)
-        progress_percentage = (i + 1) / len(chunks)
-        progress_bar.progress(progress_percentage, text=f"🎙️ 高保真语音合成中 ({i+1}/{len(chunks)} 段)...")
-        await asyncio.sleep(0.02)
-
-    progress_bar.empty()
-
-    if len(full_audio) == 0:
-        fallback_comm = edge_tts.Communicate(clean_text[:500], "zh-CN-XiaoxiaoNeural", rate=rate_str)
-        async for item in fallback_comm.stream():
-            if item["type"] == "audio":
-                full_audio.extend(item["data"])
-
-    return bytes(full_audio)
+def parse_book_catalog(catalog_url):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        res = requests.get(catalog_url, headers=headers, timeout=12)
+        res.encoding = res.apparent_encoding
+        soup = BeautifulSoup(res.text, "html.parser")
+        parsed_url = urlparse(catalog_url)
+        base_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        chapters = []
+        for a in soup.find_all("a", href=True):
+            text = a.get_text().strip()
+            href = a['href']
+            if text and (("第" in text and "章" in text) or len(text) < 30):
+                if any(kw in text for kw in ["首页", "书架", "登录", "目录", "作者", "上一页", "下一页"]):
+                    continue
+                full_url = urljoin(base_domain, href) if not href.startswith("http") else href
+                if not any(c['url'] == full_url for c in chapters):
+                    chapters.append({"title": text, "url": full_url})
+        return chapters
+    except Exception as e:
+        raise Exception(f"解析目录失败: {e}")
 
 # --------------------------------------------------
-# 7. 跨平台自适应字库引擎与金句卡片生成
+# 5. PIL 金句卡片绘制引擎
 # --------------------------------------------------
 @st.cache_resource
 def get_chinese_font(font_size=20):
-    try:
-        res = subprocess.run(['fc-list', ':lang=zh', 'file'], capture_output=True, text=True, timeout=3)
-        if res.returncode == 0 and res.stdout:
-            for line in res.stdout.splitlines():
-                font_path = line.split(':')[0].strip()
-                if font_path and os.path.exists(font_path):
-                    try:
-                        return ImageFont.truetype(font_path, font_size)
-                    except Exception:
-                        continue
-    except Exception:
-        pass
-
-    linux_paths = [
+    paths = [
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"
-    ]
-    for path in linux_paths:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, font_size)
-            except Exception:
-                continue
-
-    fallback_paths = [
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttc",
-        "C:/Windows/Fonts/simsun.ttc",
         "/System/Library/Fonts/PingFang.ttc"
     ]
-    for path in fallback_paths:
+    for path in paths:
         if os.path.exists(path):
             try:
                 return ImageFont.truetype(path, font_size)
             except Exception:
                 continue
-                
     return ImageFont.load_default()
 
 def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     quote_len = len(quote_text)
-    if quote_len <= 35:
-        font_size, chars_per_line, line_height = 22, 20, 40
-    elif quote_len <= 70:
-        font_size, chars_per_line, line_height = 18, 24, 34
-    elif quote_len <= 120:
-        font_size, chars_per_line, line_height = 16, 28, 28
-    else:
-        font_size, chars_per_line, line_height = 14, 32, 24
-
+    font_size, chars_per_line, line_height = (20, 22, 36) if quote_len <= 50 else (16, 26, 28)
     font_title = get_chinese_font(20)
     font_quote = get_chinese_font(font_size)
     font_footer = get_chinese_font(13)
     font_badge = get_chinese_font(13)
-    font_big = get_chinese_font(70)
+    font_big = get_chinese_font(60)
 
-    lines = []
-    line = ""
+    lines, line = [], ""
     for char in quote_text:
         line += char
         if len(line) >= chars_per_line:
@@ -862,356 +350,335 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     if line:
         lines.append(line)
 
-    width = 750
-    needed_text_h = len(lines) * line_height
-    height = max(480, 200 + needed_text_h)
-
+    width, height = 700, max(420, 180 + len(lines) * line_height)
     styles = {
-        "暖粉水彩": {
-            "bg_top": (252, 231, 243), "bg_bot": (254, 249, 195),
-            "card_bg": (255, 255, 255), "text": (88, 28, 135),
-            "accent": (192, 38, 211), "quote_mark": (244, 114, 182),
-            "badge_bg": (250, 232, 255), "badge_text": (168, 85, 247)
-        },
-        "莫兰迪绿": {
-            "bg_top": (209, 250, 229), "bg_bot": (236, 253, 245),
-            "card_bg": (255, 255, 255), "text": (6, 78, 59),
-            "accent": (5, 150, 105), "quote_mark": (110, 231, 183),
-            "badge_bg": (209, 250, 229), "badge_text": (4, 120, 87)
-        },
-        "天空云蓝": {
-            "bg_top": (224, 242, 254), "bg_bot": (240, 249, 255),
-            "card_bg": (255, 255, 255), "text": (12, 74, 110),
-            "accent": (2, 132, 199), "quote_mark": (125, 211, 252),
-            "badge_bg": (224, 242, 254), "badge_text": (3, 105, 161)
-        },
-        "复古奶茶": {
-            "bg_top": (254, 243, 199), "bg_bot": (254, 252, 232),
-            "card_bg": (255, 253, 248), "text": (120, 53, 15),
-            "accent": (217, 119, 6), "quote_mark": (252, 211, 77),
-            "badge_bg": (254, 243, 199), "badge_text": (180, 83, 9)
-        }
+        "暖粉水彩": {"bg_top": (252, 231, 243), "bg_bot": (254, 249, 195), "card_bg": (255, 255, 255), "text": (88, 28, 135), "accent": (192, 38, 211), "quote_mark": (244, 114, 182)},
+        "莫兰迪绿": {"bg_top": (209, 250, 229), "bg_bot": (236, 253, 245), "card_bg": (255, 255, 255), "text": (6, 78, 59), "accent": (5, 150, 105), "quote_mark": (110, 231, 183)},
+        "天空云蓝": {"bg_top": (224, 242, 254), "bg_bot": (240, 249, 255), "card_bg": (255, 255, 255), "text": (12, 74, 110), "accent": (2, 132, 199), "quote_mark": (125, 211, 252)},
+        "复古奶茶": {"bg_top": (254, 243, 199), "bg_bot": (254, 252, 232), "card_bg": (255, 253, 248), "text": (120, 53, 15), "accent": (217, 119, 6), "quote_mark": (252, 211, 77)}
     }
     s = styles.get(bg_style, styles["暖粉水彩"])
 
     img = Image.new("RGBA", (width, height))
     draw = ImageDraw.Draw(img)
-    
     for y in range(height):
         r = int(s["bg_top"][0] + (s["bg_bot"][0] - s["bg_top"][0]) * (y / height))
         g = int(s["bg_top"][1] + (s["bg_bot"][1] - s["bg_top"][1]) * (y / height))
         b = int(s["bg_top"][2] + (s["bg_bot"][2] - s["bg_top"][2]) * (y / height))
         draw.line([(0, y), (width, y)], fill=(r, g, b, 255))
 
-    margin = 35
-    card_rect = [margin, margin, width - margin, height - margin]
-    draw.rounded_rectangle(card_rect, radius=24, fill=s["card_bg"])
+    margin = 30
+    draw.rounded_rectangle([margin, margin, width - margin, height - margin], radius=20, fill=s["card_bg"])
+    draw.text((margin + 25, margin + 25), "“", fill=s["quote_mark"], font=font_big)
+    draw.text((margin + 40, margin + 30), "🌿 每日读书思维卡", fill=s["accent"], font=font_title)
 
-    draw.text((margin + 30, margin + 40), "“", fill=s["quote_mark"], font=font_big)
-    draw.text((width - margin - 80, height - margin - 110), "”", fill=s["quote_mark"], font=font_big)
-    draw.text((margin + 45, margin + 35), "🌿 每日精华金句卡", fill=s["accent"], font=font_title)
-
-    y_offset = margin + 95
+    y_off = margin + 85
     for l in lines:
-        bbox = draw.textbbox((0, 0), l, font=font_quote)
-        w = bbox[2] - bbox[0]
-        x_center = (width - w) // 2
-        draw.text((x_center, y_offset), l, fill=s["text"], font=font_quote)
-        y_offset += line_height
+        draw.text((margin + 40, y_off), l, fill=s["text"], font=font_quote)
+        y_off += line_height
 
-    if keywords:
-        x_badge = margin + 45
-        y_badge = height - margin - 75
-        for kw in keywords[:3]:
-            tag_text = f"#{kw}"
-            bbox = draw.textbbox((0, 0), tag_text, font=font_badge)
-            w = bbox[2] - bbox[0] + 18
-            h = 28
-            draw.rounded_rectangle([x_badge, y_badge, x_badge + w, y_badge + h], radius=10, fill=s["badge_bg"])
-            draw.text((x_badge + 9, y_badge + 5), tag_text, fill=s["badge_text"], font=font_badge)
-            x_badge += w + 12
-
-    draw.line([(margin + 45, height - margin - 35), (width - margin - 45, height - margin - 35)], fill=(241, 245, 249), width=1)
-    draw.text((margin + 45, height - margin - 28), "—— 随身听书 & 思维助手 · 深度领读", fill=(148, 163, 184), font=font_footer)
-
-    img_byte_arr = io.BytesIO()
-    img.convert("RGB").save(img_byte_arr, format="PNG")
-    return img_byte_arr.getvalue()
+    draw.text((margin + 40, height - margin - 30), "—— AI 全书助手 · 随身听书与思维系统", fill=(148, 163, 184), font=font_footer)
+    
+    img_byte = io.BytesIO()
+    img.convert("RGB").save(img_byte, format="PNG")
+    return img_byte.getvalue()
 
 # --------------------------------------------------
-# 8. 全语种自适应知识提炼引擎
+# 6. 知识提炼与 30 秒听前导读（Takeaways）生成器
 # --------------------------------------------------
-def clean_sentence_prefix(sentence):
-    cleaned = sentence.strip()
-    patterns = [
-        r"^(?:[0-9一二三四五六七八九十]+[.\s、]|核心观点|观点|总结|总之|首先|其次|最后)[：:\s]*",
-        r"^我认为[，,]?",
-        r"^在我看来[，,]?",
-        r"^我举一个简单的例子[：:]?",
-    ]
-    for p in patterns:
-        cleaned = re.sub(p, "", cleaned)
-    return cleaned.strip()
-
-def is_noise_or_heading(sentence):
-    s = sentence.strip()
-    if any(kw in s for kw in ["深度领读", "导读", "作者：", "来源：", "点击上方", "关注我们"]):
-        return True
-    if re.match(r'^(?:[一二三四五六七八九十]+[、\.\s]|\d+[、\.\s]|结语|总结|引言|前言|摘要)', s):
-        return True
-    if len(s) < 15 or len(s) > 140:
-        return True
-    return False
-
-def extract_with_ollama(text, model_name):
-    url = "http://localhost:11434/api/generate"
-    prompt = f"""
-    你是一个资深的知识提炼专家。请对以下文本进行深度解析与领读归纳，格式要求如下：
-
-    📌 **一句话精髓**：
-    (用精炼的一句话概括核心逻辑)
-
-    🔑 **核心要点与主要重点**：
-    1. 
-    2. 
-    3. 
-
-    📊 **关键数据与硬核事实**：
-    (列出文中提到的核心数据、百分比或关键概念)
-
-    文本内容：
-    {text}
-    """
-    payload = {"model": model_name, "prompt": prompt, "stream": False}
-
-    try:
-        response = requests.post(url, json=payload, timeout=60)
-        if response.status_code == 200:
-            res_json = response.json()
-            ai_output = res_json.get("response", "")
-
-            top_quote = ""
-            quote_match = re.search(r"📌 \*\*一句话精髓\*\*：?\n?>?\s*(.*)", ai_output)
-            if quote_match:
-                top_quote = quote_match.group(1).split("\n")[0].strip()
-            else:
-                top_quote = "把握事物的底层逻辑与核心原则。"
-
-            return ai_output, top_quote, ["知识提炼", "核心要领"]
-        else:
-            raise Exception(f"Ollama 返回错误代码: {response.status_code}")
-    except Exception as e:
-        raise Exception(f"Ollama 连接异常: {e}")
+def extract_chapter_takeaways(text):
+    """自动生成听前 30 秒 3 Key Takeaways 导读卡"""
+    if not text:
+        return ["暂无前瞻提示"]
+    paragraphs = [p.strip() for p in text.split("\n") if len(p.strip()) > 20]
+    takeaways = []
+    for p in paragraphs:
+        if len(takeaways) >= 3:
+            break
+        s = p.split("。")[0].strip()
+        if len(s) > 10 and not any(kw in s for kw in ["目录", "作者"]):
+            takeaways.append(s)
+    if not takeaways:
+        takeaways = [text[:40] + "..."]
+    return takeaways
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def extract_ultimate_local_insights(text):
     if not text.strip():
         return "", "", []
-
     char_count = len(text)
     read_minutes = round(char_count / 300, 1)
-
-    has_chinese = bool(re.search(r'[\u4e00-\u9fa5]', text))
-
-    if has_chinese:
-        keywords = jieba.analyse.textrank(
-            text, topK=6, withWeight=False, allowPOS=("n", "vn", "nz", "nr", "nt", "eng")
-        )
-    else:
-        words = re.findall(r'\b[A-Za-z]{4,}\b', text)
-        keywords = list(set(words))[:6]
-
+    
+    keywords = jieba.analyse.textrank(text, topK=6, withWeight=False, allowPOS=("n", "vn", "nz", "nr", "nt", "eng"))
     paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
     candidates = []
-    data_sentences = []
     
     for p in paragraphs:
-        sentences = re.split(r"[。！!？\?.]", p)
-        for s in sentences:
+        for s in re.split(r"[。！!？]", p):
             s_clean = s.strip()
-            if is_noise_or_heading(s_clean):
-                continue
-
-            if re.search(r"\d+(\.\d+)?(%|亿|万|percent|years|times)?", s_clean) and len(s_clean) > 15:
-                if s_clean not in data_sentences and len(data_sentences) < 3:
-                    data_sentences.append(clean_sentence_prefix(s_clean))
-
-            score = 0
-            if any(kw in s_clean for kw in keywords[:5]):
-                score += 4
-            if any(w in s_clean.lower() for w in ["important", "key", "essential", "core", "底层", "核心", "关键", "本质"]):
-                score += 5
-
-            if score >= 4:
-                clean_s = clean_sentence_prefix(s_clean)
-                if clean_s and not is_noise_or_heading(clean_s):
-                    candidates.append((score, clean_s))
-
+            if len(s_clean) > 15:
+                score = sum(4 for kw in keywords if kw in s_clean)
+                if score > 0:
+                    candidates.append((score, s_clean))
+                    
     candidates.sort(key=lambda x: x[0], reverse=True)
+    top_points = [c[1] for c in candidates[:3]]
+    top_quote = top_points[0] if top_points else "把握事物本质，逆向思考问题。"
+
+    summary_md = f"📈 **文本体检**：本章共 **{char_count}** 字 | ⏱️ 预估阅读 **{read_minutes}** 分钟\n\n"
+    summary_md += f"🏷️ **核心主题**： " + " ".join([f"`#{kw}`" for kw in keywords]) + "\n\n"
+    summary_md += "🎯 **核心观点精炼**：\n"
+    for i, pt in enumerate(top_points, 1):
+        summary_md += f"**{i}.** {pt}。\n"
+        
+    return summary_md, top_quote, keywords
+
+# --------------------------------------------------
+# 7. 侧边栏 (控制中心 + 章节树状选择)
+# --------------------------------------------------
+with st.sidebar:
+    st.title("🎧 控制中心")
+    st.caption("AI 全书助手 (Ultimate Edition)")
     
-    unique_candidates = []
-    seen = set()
-    for _, s in candidates:
-        if s not in seen and len(s) > 15:
-            seen.add(s)
-            unique_candidates.append(s)
+    # Mode 1: 引擎选配
+    with st.expander("⚙️ AI 模型与并发配置", expanded=False):
+        use_ollama = st.checkbox("🧠 启用 Ollama (Qwen) 本地大模型", value=False)
+        ollama_model = st.text_input("Ollama 模型名称:", value="qwen2.5:1.5b")
+        concurrency_workers = st.slider("⚡ TTS 并发线程数:", 4, 16, 10, help="越高合成越快，建议 10 线程")
+        use_md5_cache = st.checkbox("💾 启用 MD5 磁盘秒刷缓存", value=True)
 
-    top_one_sentence = unique_candidates[0] if unique_candidates else "把握文本的核心逻辑与核心观点。"
-    top_points = unique_candidates[:3] if len(unique_candidates) >= 3 else unique_candidates
+    st.divider()
+    
+    # Mode 2: 多源数据导入
+    st.subheader("📥 导入阅读内容")
+    input_mode = st.radio(
+        "选择输入方式：",
+        ["📁 上传电子书/文件 (.pdf/epub/txt)", "📚 智能分章节听书 (目录网址)", "✍️ 粘贴纯文本/单页URL"],
+        index=0
+    )
 
-    summary_md = f"📈 **文本体检**：全文共 **{char_count}** 字  |  ⏱️ 预估阅读约 **{read_minutes}** 分钟\n\n"
-    kw_badges = " ".join([f"`#{kw}`" for kw in keywords]) if keywords else "暂无"
-    summary_md += f"🏷️ **核心主题标签**：\n{kw_badges}\n\n"
+    if input_mode == "📁 上传电子书/文件 (.pdf/epub/txt)":
+        uploaded_file = st.file_uploader("上传文件：", type=["txt", "pdf", "docx", "epub"])
+        if uploaded_file is not None:
+            filename = uploaded_file.name.lower()
+            extracted_raw = ""
+            if filename.endswith(".txt"):
+                extracted_raw = uploaded_file.read().decode("utf-8", errors="ignore")
+            elif filename.endswith(".pdf"):
+                reader = PdfReader(uploaded_file)
+                extracted_raw = "\n".join([p.extract_text() for p in reader.pages if p.extract_text()])
+            elif filename.endswith(".docx") and HAS_DOCX:
+                doc = docx.Document(uploaded_file)
+                extracted_raw = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+            elif filename.endswith(".epub") and HAS_EPUB:
+                book = epub.read_epub(io.BytesIO(uploaded_file.read()))
+                texts = [BeautifulSoup(item.get_content(), 'html.parser').get_text() for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)]
+                extracted_raw = "\n".join(texts)
 
-    summary_md += "🎯 **核心观点深度提炼**：\n"
-    if top_points:
-        for i, pt in enumerate(top_points, 1):
-            summary_md += f"**{i}.** {pt}。\n\n"
+            cleaned_full = clean_extracted_text(extracted_raw)
+            if cleaned_full != st.session_state.loaded_text:
+                st.session_state.loaded_text = cleaned_full
+                st.session_state.chapters = split_text_into_chapters(cleaned_full)
+                st.session_state.selected_chapter_idx = 0
+                st.session_state.full_audio_bytes = None
+                st.success(f"🎉 成功解析并分出 {len(st.session_state.chapters)} 个章节！")
 
-    if data_sentences:
-        summary_md += "📊 **关键数据与硬核事实**：\n"
-        for ds in data_sentences:
-            summary_md += f"• {ds}。\n"
-
-    return summary_md, top_one_sentence, keywords
-
-# --------------------------------------------------
-# 9. Session State 状态管理与操作区
-# --------------------------------------------------
-if "full_audio_bytes" not in st.session_state:
-    st.session_state.full_audio_bytes = None
-if "local_summary" not in st.session_state:
-    st.session_state.local_summary = ""
-if "top_quote" not in st.session_state:
-    st.session_state.top_quote = ""
-if "current_keywords" not in st.session_state:
-    st.session_state.current_keywords = []
-if "summary_audio_bytes" not in st.session_state:
-    st.session_state.summary_audio_bytes = None
-
-col1, col2 = st.columns(2)
-
-with col1:
-    if st.button("🚀 生成完整音频", type="primary", use_container_width=True):
-        if not raw_text.strip():
-            st.warning("请先加载章节或粘贴文本！")
-        else:
-            with st.spinner("正在合成高保真音频..."):
+    elif input_mode == "📚 智能分章节听书 (目录网址)":
+        catalog_url = st.text_input("输入书籍目录 URL:")
+        if st.button("📚 解析目录", use_container_width=True):
+            if catalog_url:
                 try:
+                    ch_list = parse_book_catalog(catalog_url)
+                    if ch_list:
+                        st.session_state.chapters = [{"title": c["title"], "url": c["url"], "content": ""} for c in ch_list]
+                        st.session_state.selected_chapter_idx = 0
+                        st.success(f"🎉 成功抓取到 {len(ch_list)} 章！")
+                except Exception as e:
+                    st.error(f"解析失败: {e}")
+
+    else:
+        user_text = st.text_area("粘贴文本/网址：", height=150)
+        if st.button("🚀 导入文本", use_container_width=True):
+            if user_text.startswith("http"):
+                fetched = fetch_text_from_url(user_text)
+                cleaned = clean_extracted_text(fetched)
+            else:
+                cleaned = clean_extracted_text(user_text)
+            st.session_state.loaded_text = cleaned
+            st.session_state.chapters = split_text_into_chapters(cleaned)
+            st.session_state.selected_chapter_idx = 0
+            st.session_state.full_audio_bytes = None
+
+    # Mode 3: 已解析章节目录树选择
+    st.divider()
+    if st.session_state.chapters:
+        st.subheader("📖 已解析章节目录树")
+        chapter_titles = [f"{i+1}. {c['title']}" for i, c in enumerate(st.session_state.chapters)]
+        selected_idx = st.selectbox(
+            "切换当前听读章节：",
+            range(len(chapter_titles)),
+            format_func=lambda i: chapter_titles[i],
+            index=st.session_state.selected_chapter_idx
+        )
+        if selected_idx != st.session_state.selected_chapter_idx:
+            st.session_state.selected_chapter_idx = selected_idx
+            st.session_state.full_audio_bytes = None
+
+    # Mode 4: 朗读音色与倍速
+    st.divider()
+    st.subheader("🎛️ 语音属性设置")
+    voice_option = st.selectbox(
+        "选择音色：",
+        ["zh-CN-XiaoxiaoNeural", "zh-CN-YunxiNeural", "en-US-AvaMultilingualNeural", "ja-JP-NanamiNeural"],
+        format_func=lambda x: {"zh-CN-XiaoxiaoNeural": "🇨🇳 晓晓 (女声)", "zh-CN-YunxiNeural": "🎙️ 云希 (男声)", "en-US-AvaMultilingualNeural": "🌐 Ava (双语)", "ja-JP-NanamiNeural": "🇯🇵 七海 (日语)"}.get(x, x)
+    )
+    speech_rate = st.slider("⚡ 播放语速：", 0.5, 2.0, 1.0, 0.1, format="%.1fx")
+    rate_str = f"{int(round((speech_rate - 1.0) * 100)):+d}%"
+
+# --------------------------------------------------
+# 8. 主界面工作区：Tabs 三阶段知识消化系统
+# --------------------------------------------------
+st.title("📚 AI 全书助手与知识终端")
+
+# 确定当前章节文本
+current_chapter_content = ""
+if st.session_state.chapters:
+    cur_ch = st.session_state.chapters[st.session_state.selected_chapter_idx]
+    if "content" in cur_ch and cur_ch["content"]:
+        current_chapter_content = cur_ch["content"]
+    elif "url" in cur_ch:
+        with st.spinner("⏳ 正在动态加载该章节正文..."):
+            fetched = fetch_text_from_url(cur_ch["url"])
+            current_chapter_content = clean_extracted_text(fetched)
+            cur_ch["content"] = current_chapter_content
+else:
+    current_chapter_content = st.session_state.loaded_text
+
+# 渲染三大主选项卡 (Tab 1, Tab 2, Tab 3)
+tab1, tab2, tab3 = st.tabs(["🎧 智能播放与导读卡", "🤔 AI 伴读对话", "📝 知识沉淀与导出"])
+
+# ==================================================
+# TAB 1: 智能播放与导读卡
+# ==================================================
+with tab1:
+    if not current_chapter_content:
+        st.info("👈 请先在左侧侧边栏导入文件、网址或纯文本。")
+    else:
+        # 1. 30秒听前前瞻导读卡 (Takeaways)
+        takeaways = extract_chapter_takeaways(current_chapter_content)
+        st.success("💡 **30 秒听前导读卡 (Key Takeaways)**")
+        t_cols = st.columns(len(takeaways))
+        for idx, takeaway_text in enumerate(takeaways):
+            with t_cols[idx]:
+                st.markdown(f"**要点 {idx+1}**")
+                st.caption(takeaway_text)
+
+        st.divider()
+
+        # 2. 播放控制与并发合成按钮
+        col_synth, col_status = st.columns([1, 2])
+        with col_synth:
+            if st.button("🚀 并发合成 / 播放本章音频", type="primary", use_container_width=True):
+                with st.spinner("并发线程合成中..."):
                     audio_bytes = run_async_safe(
-                        generate_audio_bytes_safe(raw_text, voice_option, rate_str)
+                        generate_audio_bytes_parallel(current_chapter_content, voice_option, rate_str, concurrency_workers)
                     )
                     st.session_state.full_audio_bytes = audio_bytes
-                    st.success("🎉 完整音频合成完成！")
-                except Exception as e:
-                    st.error(f"生成失败: {e}")
+                    st.success("🎉 音频生成/缓存读取完成！")
 
-with col2:
-    if st.button("⚡ 开始知识深度提炼", use_container_width=True):
-        if not raw_text.strip():
-            st.warning("请先加载章节或粘贴文本！")
-        else:
-            if use_ollama:
-                with st.spinner("🧠 正在调用本地 Ollama (Qwen) AI 大模型思考中..."):
+        if st.session_state.full_audio_bytes:
+            st.audio(st.session_state.full_audio_bytes, format="audio/mp3")
+
+        # 3. 章节正文折叠查看器
+        with st.expander("📄 查看本章高亮与深度清洗文本", expanded=False):
+            st.text_area("正文内容：", current_chapter_content, height=250)
+
+        st.divider()
+
+        # 4. 精华金句卡片生成
+        st.subheader("🖼️ 自动生成【每日精华金句卡】")
+        summary_md, top_quote, kws = extract_ultimate_local_insights(current_chapter_content)
+        card_quote = st.text_input("✏️ 确认 / 修改金句文字：", value=top_quote)
+        card_style = st.selectbox("🎨 视觉风格：", ["暖粉水彩", "莫兰迪绿", "天空云蓝", "复古奶茶"])
+        
+        card_bytes = generate_quote_card(card_quote, card_style, kws)
+        st.image(card_bytes, width=500)
+        st.download_button("📥 保存金句卡片 (.png)", data=card_bytes, file_name="quote_card.png", mime="image/png")
+
+# ==================================================
+# TAB 2: AI 伴读对话 (Contextual Chat)
+# ==================================================
+with tab2:
+    st.subheader("💬 随听随问 AI 伴读助手")
+    st.caption("AI 已自动绑定当前选定章节上下文。你可以随时提炼公式、解释概念或询问推演步骤。")
+
+    # 快捷发问按钮
+    col_q1, col_q2, col_q3 = st.columns(3)
+    quick_query = None
+    if col_q1.button("💡 提炼本章思维模型", use_container_width=True):
+        quick_query = "请帮我提取本章中涉及的所有思维模型、核心决策逻辑或规律算法。"
+    if col_q2.button("📊 梳理文中数据与对比", use_container_width=True):
+        quick_query = "请帮我整理本章提及的所有硬核数据、百分比与核心事实表格。"
+    if col_q3.button("🔄 运用逆向思维推演", use_container_width=True):
+        quick_query = "根据本章内容，如果用逆向思维（Inversion）来看，我们应该避免哪些错误？"
+
+    # 显示历史对话
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # 处理输入
+    user_input = st.chat_input("向 AI 发问本章内容...")
+    final_query = quick_query if quick_query else user_input
+
+    if final_query:
+        st.session_state.chat_history.append({"role": "user", "content": final_query})
+        with st.chat_message("user"):
+            st.markdown(final_query)
+
+        with st.chat_message("assistant"):
+            with st.spinner("🧠 正在结合当前章节分析中..."):
+                if use_ollama:
                     try:
-                        summary_res, top_quote, kws = extract_with_ollama(raw_text, ollama_model)
-                        st.session_state.local_summary = summary_res
-                        st.session_state.top_quote = top_quote
-                        st.session_state.current_keywords = kws
-                        st.success("🎉 本地 Ollama (Qwen) 大模型提炼完成！")
-                    except Exception as e:
-                        st.error(f"Ollama 连接失败({e})，已自动无缝切回自适应算法！")
-                        summary_res, top_quote, kws = extract_ultimate_local_insights(raw_text)
-                        st.session_state.local_summary = summary_res
-                        st.session_state.top_quote = top_quote
-                        st.session_state.current_keywords = kws
-            else:
-                with st.spinner("⚡ 正在通过智能增强引擎深度提炼中..."):
-                    summary_res, top_quote, kws = extract_ultimate_local_insights(raw_text)
-                    st.session_state.local_summary = summary_res
-                    st.session_state.top_quote = top_quote
-                    st.session_state.current_keywords = kws
-                    st.success("🎉 深度提炼完成！")
+                        prompt = f"上下文内容：\n{current_chapter_content[:3000]}\n\n用户问题：{final_query}"
+                        res = requests.post("http://localhost:11434/api/generate", json={"model": ollama_model, "prompt": prompt, "stream": False}, timeout=30)
+                        ans = res.json().get("response", "无法获取 Ollama 回复。")
+                    except Exception:
+                        ans = "Ollama 未开启，已为您切回本地提取。"
+                else:
+                    # 本地算法提炼
+                    summary_md, _, _ = extract_ultimate_local_insights(current_chapter_content)
+                    ans = f"**针对问题**：{final_query}\n\n**基于当前章节分析**：\n" + summary_md
 
-# --------------------------------------------------
-# 10. 结果展示区 (增加金句手动修改功能)
-# --------------------------------------------------
-if st.session_state.full_audio_bytes:
-    st.divider()
-    st.subheader("🎧 完整文章听书")
-    st.audio(st.session_state.full_audio_bytes, format="audio/mp3")
-    st.download_button(
-        "📥 下载完整听书 MP3",
-        data=st.session_state.full_audio_bytes,
-        file_name="audiobook_chapter.mp3",
-        mime="audio/mp3",
-        use_container_width=True,
-    )
+                st.markdown(ans)
+                st.session_state.chat_history.append({"role": "assistant", "content": ans})
 
-if st.session_state.local_summary:
-    st.divider()
-    st.subheader("💡 深度领读分析报告")
+# ==================================================
+# TAB 3: 知识沉淀与导出
+# ==================================================
+with tab3:
+    st.subheader("📝 全书/本章知识沉淀报告")
+    if current_chapter_content:
+        summary_md, top_quote, kws = extract_ultimate_local_insights(current_chapter_content)
+        st.markdown(summary_md)
 
-    if st.session_state.top_quote:
-        st.info(f"📌 **一句话精髓**\n\n“ {st.session_state.top_quote} ”")
-
-    st.markdown(st.session_state.local_summary)
-
-    if st.session_state.top_quote:
-        with st.expander("🖼️ 查看 / 保存自动生成的【每日精华金句卡】", expanded=True):
-            edited_quote = st.text_area(
-                "✏️ 编辑卡片金句文字（可自由修改润色）：",
-                value=st.session_state.top_quote,
-                height=70
-            )
-            card_style = st.selectbox(
-                "🎨 选择卡片背景风格：",
-                ["暖粉水彩", "莫兰迪绿", "天空云蓝", "复古奶茶"]
-            )
-            card_bytes = generate_quote_card(
-                edited_quote, 
-                bg_style=card_style,
-                keywords=st.session_state.current_keywords
-            )
-            st.image(card_bytes, use_container_width=True)
+        st.divider()
+        st.subheader("📦 多格式一键导出")
+        d_col1, d_col2 = st.columns(2)
+        with d_col1:
             st.download_button(
-                label=f"📥 保存【{card_style}】每日精华金句卡 (.png)",
-                data=card_bytes,
-                file_name=f"essential_quote_card_{card_style}.png",
-                mime="image/png",
-                use_container_width=True,
+                "💾 导出 Markdown 读书笔记 (.md)",
+                data=f"# 读书笔记\n\n{summary_md}\n\n## 原文内容\n{current_chapter_content}",
+                file_name="book_notes.md",
+                mime="text/markdown",
+                use_container_width=True
             )
-
-    st.divider()
-    sub_col1, sub_col2 = st.columns(2)
-
-    with sub_col1:
-        if st.button("🎙️ 将总结转为速读音频", use_container_width=True):
-            with st.spinner("正在生成总结音频..."):
-                try:
-                    summary_bytes = run_async_safe(
-                        generate_audio_bytes_safe(st.session_state.local_summary, voice_option, rate_str)
-                    )
-                    st.session_state.summary_audio_bytes = summary_bytes
-                    st.success("🎉 总结音频生成成功！")
-                except Exception as e:
-                    st.error(f"生成失败: {e}")
-
-    with sub_col2:
-        st.download_button(
-            label="💾 保存每日笔记 (.txt)",
-            data=st.session_state.local_summary,
-            file_name="daily_knowledge_note.txt",
-            mime="text/plain",
-            use_container_width=True,
-        )
-
-if st.session_state.summary_audio_bytes:
-    st.audio(st.session_state.summary_audio_bytes, format="audio/mp3")
-    st.download_button(
-        "📥 下载总结速读 MP3",
-        data=st.session_state.summary_audio_bytes,
-        file_name="summary_audio.mp3",
-        mime="audio/mp3",
-        use_container_width=True,
-    )
+        with d_col2:
+            if st.session_state.full_audio_bytes:
+                st.download_button(
+                    "📥 导出音频文件 (.mp3)",
+                    data=st.session_state.full_audio_bytes,
+                    file_name="chapter_audio.mp3",
+                    mime="audio/mp3",
+                    use_container_width=True
+                )
