@@ -14,6 +14,20 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
+# 尝试导入 python-docx 与 ebooklib (扩展电子书支持)
+try:
+    import docx
+    HAS_DOCX = True
+except ImportError:
+    HAS_DOCX = False
+
+try:
+    import ebooklib
+    from ebooklib import epub
+    HAS_EPUB = True
+except ImportError:
+    HAS_EPUB = False
+
 # 尝试导入 youtube_transcript_api 与 yt_dlp
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
@@ -38,12 +52,12 @@ except ImportError:
 # 1. 页面基本配置
 # --------------------------------------------------
 st.set_page_config(
-    page_title="随身听书 & 思维助手 (全球旗舰版)", page_icon="🎧", layout="centered"
+    page_title="随身听书 & 思维助手 (全能旗舰版)", page_icon="🎧", layout="centered"
 )
 
 st.title("🎧 随身听书 & 思维助手 (Global Ultimate Edition)")
 st.caption(
-    "全球国际化通用版：300+ 中英双语全球 AI 动态音色库 + YouTube 双核纯净字幕抓取 + 智能听书提炼"
+    "全能旗舰版：300+ 中英双语 AI 音色 + 倍速调节 + 电子书/PDF深度清洗 + YouTube纯净字幕"
 )
 
 # --------------------------------------------------
@@ -63,11 +77,56 @@ with st.sidebar:
     )
 
 # --------------------------------------------------
-# 3. 高级网页与 YouTube 自动解析函数 (含 JSON 纯净字幕清洗)
+# 3. 文本深度清洗与高级网页/字幕解析函数
 # --------------------------------------------------
+def clean_extracted_pdf_text(text):
+    """深度清洗 PDF/电子书提取文本：强力过滤页码、页眉杂音与非法换行"""
+    if not text:
+        return ""
+    lines = text.split("\n")
+    cleaned_lines = []
+    
+    # 常见水印、页眉页脚与垃圾占位符过滤词
+    noise_keywords = ["家庭发展基金", "ICAC", "署政", "編者的話", "智多多大道理小故事"]
+    noise_symbols = {"M", "W", "NNN", "B", "FES", "0", "00", "000"}
+
+    # 专门针对各类页码的正则表达式（解决念页码的怪异感）
+    page_patterns = [
+        r'^\s*\d+\s*$',                 # 纯数字: "12"
+        r'^\s*-\s*\d+\s*-\s*$',         # 带横杠: "- 12 -"
+        r'^\s*第\s*\d+\s*页\s*$',       # 中文页码: "第 12 页"
+        r'^\s*Page\s*\d+\s*$',          # 英文页码: "Page 12"
+    ]
+
+    for line in lines:
+        l = line.strip()
+        
+        # 1. 过滤空行与单字母杂音
+        if not l or l in noise_symbols:
+            continue
+            
+        # 2. 强力正则匹配过滤各类页码
+        is_page_num = False
+        for pattern in page_patterns:
+            if re.match(pattern, l, re.IGNORECASE):
+                is_page_num = True
+                break
+        if is_page_num:
+            continue
+            
+        # 3. 过滤页眉页脚机构名称
+        if any(kw in l for kw in noise_keywords):
+            continue
+            
+        cleaned_lines.append(l)
+
+    full_text = "\n".join(cleaned_lines)
+    # 4. 修复被 PDF 强行截断的句中换行（非标点符号结尾的换行连起来）
+    full_text = re.sub(r'([^。！？!？\n])\n([^。！？!？\n])', r'\1\2', full_text)
+    return full_text.strip()
+
 def parse_youtube_subtitle_text(raw_str):
     """智能解析 JSON3 / VTT / XML 格式的原始字幕流，解析并提炼纯净文字"""
-    # 1. 优先解析 YouTube json3 结构（彻底排除 {"wireMagic": ...} 干扰）
     try:
         sub_data = json.loads(raw_str)
         if "events" in sub_data:
@@ -83,7 +142,6 @@ def parse_youtube_subtitle_text(raw_str):
     except Exception:
         pass
 
-    # 2. 兜底解析 VTT / HTML 标签文本
     clean_text = re.sub(r'<[^>]+>', '', raw_str)
     clean_text = re.sub(r'\d{2}:\d{2}:\d{2}\.\d{3}.*?\n', '', clean_text)
     lines = [
@@ -170,10 +228,8 @@ def extract_youtube_id(url):
 
 @st.cache_data(show_spinner=False, ttl=1800)
 def fetch_youtube_transcript_backend(video_id, full_url=""):
-    """Python 后端双核 YouTube 字幕提取引擎 (API + yt-dlp 纯净解包)"""
     preferred_langs = ['zh-Hans', 'zh-Hant', 'zh', 'en', 'ja', 'es', 'de', 'fr', 'ko', 'vi', 'th', 'ru']
 
-    # 第一核：YouTubeTranscriptApi
     if HAS_YOUTUBE_API:
         try:
             data = YouTubeTranscriptApi.get_transcript(video_id, languages=preferred_langs)
@@ -187,7 +243,6 @@ def fetch_youtube_transcript_backend(video_id, full_url=""):
             except Exception:
                 pass
 
-    # 第二核：yt-dlp 强力破解提取 + 自动 json3 纯净解包
     if HAS_YTDLP and full_url:
         try:
             ydl_opts = {
@@ -217,7 +272,6 @@ def fetch_youtube_transcript_backend(video_id, full_url=""):
     return False, "后端抓取受限（可能云端 IP 被 YouTube 封锁，请使用下方手机 CORS 代理）", "zh"
 
 def detect_language(text):
-    """全语种精准识别引擎"""
     if not text or len(text.strip()) == 0:
         return 'zh'
     if re.search(r'[\u4e00-\u9fa5]', text):
@@ -249,12 +303,12 @@ def run_async_safe(coroutine):
             loop.close()
 
 # --------------------------------------------------
-# 4. 多功能输入层
+# 4. 多功能输入层 (扩充 EPUB/DOCX + 文本编辑预览)
 # --------------------------------------------------
 st.subheader("📥 导入阅读内容")
 input_mode = st.radio(
     "选择输入方式：",
-    ["✍️ 粘贴纯文本或单页网址(URL)", "📚 智能分章节整本听书 (目录网址)", "🌐 粘贴 YouTube 视频链接", "📁 上传文件 (.txt / .pdf)"],
+    ["✍️ 粘贴纯文本或单页网址(URL)", "📚 智能分章节整本听书 (目录网址)", "🌐 粘贴 YouTube 视频链接", "📁 上传文件 (.txt / .pdf / .docx / .epub)"],
     horizontal=True,
 )
 
@@ -449,24 +503,53 @@ elif input_mode == "🌐 粘贴 YouTube 视频链接":
 
 else:
     uploaded_file = st.file_uploader(
-        "支持上传 .txt 或 .pdf 电子书文件", type=["txt", "pdf"]
+        "支持上传 .txt / .pdf / .docx / .epub 电子书文件", type=["txt", "pdf", "docx", "epub"]
     )
     if uploaded_file is not None:
-        if uploaded_file.name.endswith(".txt"):
-            raw_text = uploaded_file.read().decode("utf-8", errors="ignore")
-        elif uploaded_file.name.endswith(".pdf"):
+        filename = uploaded_file.name.lower()
+        extracted_raw = ""
+        
+        if filename.endswith(".txt"):
+            extracted_raw = uploaded_file.read().decode("utf-8", errors="ignore")
+        elif filename.endswith(".pdf"):
             pdf_reader = PdfReader(uploaded_file)
             extracted_pages = []
             for page in pdf_reader.pages:
                 text_page = page.extract_text()
                 if text_page:
                     extracted_pages.append(text_page)
-            raw_text = "\n".join(extracted_pages)
-        st.success(f"成功导入文件，共读取到 {len(raw_text)} 个字符！")
-        detected_lang_code = detect_language(raw_text)
+            extracted_raw = "\n".join(extracted_pages)
+        elif filename.endswith(".docx"):
+            if HAS_DOCX:
+                doc = docx.Document(uploaded_file)
+                extracted_raw = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+            else:
+                st.error("未安装 python-docx 依赖！请在终端运行: pip install python-docx")
+        elif filename.endswith(".epub"):
+            if HAS_EPUB:
+                book = epub.read_epub(io.BytesIO(uploaded_file.read()))
+                texts = []
+                for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+                    soup = BeautifulSoup(item.get_content(), 'html.parser')
+                    texts.append(soup.get_text())
+                extracted_raw = "\n".join(texts)
+            else:
+                st.error("未安装 ebooklib 依赖！请在终端运行: pip install ebooklib")
+
+        # 调用深度清洗逻辑（剔除页码与干扰词）
+        raw_text = clean_extracted_pdf_text(extracted_raw)
+        
+        if len(raw_text.strip()) > 0:
+            st.success(f"🎉 成功导入并深度清洗文件，共提取到 {len(raw_text)} 个有效字符！")
+            detected_lang_code = detect_language(raw_text)
+            
+            with st.expander("📄 查看 / 编辑提取出的纯净文本（已自动过滤页码与杂音）", expanded=False):
+                raw_text = st.text_area("文本预览：", raw_text, height=180)
+        else:
+            st.error("⚠️ 无法从该文件中提取有效文本（可能是纯图片扫描版 PDF 或文件损坏）。")
 
 # --------------------------------------------------
-# 5. 【中英双语版】微软 300+ 全球动态 AI 音色库映射
+# 5. 微软 300+ 全球动态 AI 音色 + 倍速调节面板
 # --------------------------------------------------
 LOCALE_LANG_MAP = {
     'zh-CN': ('中文普通话', 'Mandarin'),
@@ -513,7 +596,6 @@ LOCALE_FLAGS = {
 
 @st.cache_resource
 def fetch_all_global_voices():
-    """实时向微软服务器同步全球 300+ 种神经网络音色（中英双语可读格式）"""
     try:
         voices = run_async_safe(edge_tts.list_voices())
         voice_dict = {}
@@ -565,15 +647,35 @@ def calc_default_voice_index(lang_code, keys):
 
 default_idx = calc_default_voice_index(detected_lang_code, voice_keys)
 
-voice_option = st.selectbox(
-    "选择朗读音色（已自动推荐最佳音色，也可手动搜索全球 300+ 种中英双语音色）：",
-    options=voice_keys,
-    index=default_idx,
-    format_func=lambda x: GLOBAL_VOICES[x],
-)
+# 音色与语速属性面板
+st.markdown("##### 🎛️ 音频播放属性设置")
+speech_col1, speech_col2 = st.columns([2, 1])
+
+with speech_col1:
+    voice_option = st.selectbox(
+        "选择朗读音色（已自动推荐最佳音色）：",
+        options=voice_keys,
+        index=default_idx,
+        format_func=lambda x: GLOBAL_VOICES[x],
+    )
+
+with speech_col2:
+    speech_rate_val = st.slider(
+        "⚡ 播放语速：",
+        min_value=0.5,
+        max_value=2.0,
+        value=1.0,
+        step=0.1,
+        format="%.1fx",
+        help="支持 0.5x 慢速精听 到 2.0x 快速听书"
+    )
+
+# 转换语速百分比字符串格式 (+20%, -10%)
+rate_percentage = int(round((speech_rate_val - 1.0) * 100))
+rate_str = f"{rate_percentage:+d}%"
 
 # --------------------------------------------------
-# 6. 纯净语音与安全切片引擎 (防崩溃双层降级处理)
+# 6. 纯净语音与安全切片引擎 (含进度条与倍速合成)
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -624,20 +726,21 @@ def split_text_chunks_safe(text, max_chunk_size=800):
 
     return chunks if chunks else [text]
 
-async def synth_single_chunk(chunk, voice):
+async def synth_single_chunk(chunk, voice, rate_str="+0%"):
     audio_data = bytearray()
     try:
-        communicate = edge_tts.Communicate(chunk, voice)
+        communicate = edge_tts.Communicate(chunk, voice, rate=rate_str)
         async for item in communicate.stream():
             if item["type"] == "audio":
                 audio_data.extend(item["data"])
     except Exception:
         pass
     
+    # 彻底防崩溃：不兼容时自动切至多语言备用音色
     if len(audio_data) == 0:
         fallback_voice = "zh-CN-XiaoxiaoNeural" if re.search(r'[\u4e00-\u9fa5]', chunk) else "en-US-AvaMultilingualNeural"
         try:
-            communicate = edge_tts.Communicate(chunk, fallback_voice)
+            communicate = edge_tts.Communicate(chunk, fallback_voice, rate=rate_str)
             async for item in communicate.stream():
                 if item["type"] == "audio":
                     audio_data.extend(item["data"])
@@ -646,18 +749,24 @@ async def synth_single_chunk(chunk, voice):
             
     return audio_data
 
-async def generate_audio_bytes_safe(text, voice):
+async def generate_audio_bytes_safe(text, voice, rate_str="+0%"):
     clean_text = clean_markdown_for_speech(text)
     chunks = split_text_chunks_safe(clean_text)
     
     full_audio = bytearray()
-    for chunk in chunks:
-        res = await synth_single_chunk(chunk, voice)
+    progress_bar = st.progress(0, text="🎙️ 正在逐段合成高保真语音...")
+    
+    for i, chunk in enumerate(chunks):
+        res = await synth_single_chunk(chunk, voice, rate_str)
         full_audio.extend(res)
-        await asyncio.sleep(0.05)
+        progress_percentage = (i + 1) / len(chunks)
+        progress_bar.progress(progress_percentage, text=f"🎙️ 高保真语音合成中 ({i+1}/{len(chunks)} 段)...")
+        await asyncio.sleep(0.02)
+
+    progress_bar.empty()
 
     if len(full_audio) == 0:
-        fallback_comm = edge_tts.Communicate(clean_text[:500], "zh-CN-XiaoxiaoNeural")
+        fallback_comm = edge_tts.Communicate(clean_text[:500], "zh-CN-XiaoxiaoNeural", rate=rate_str)
         async for item in fallback_comm.stream():
             if item["type"] == "audio":
                 full_audio.extend(item["data"])
@@ -971,10 +1080,10 @@ with col1:
         if not raw_text.strip():
             st.warning("请先加载章节或粘贴文本！")
         else:
-            with st.spinner("正在合成完整音频（长文本请稍候）..."):
+            with st.spinner("正在合成高保真音频..."):
                 try:
                     audio_bytes = run_async_safe(
-                        generate_audio_bytes_safe(raw_text, voice_option)
+                        generate_audio_bytes_safe(raw_text, voice_option, rate_str)
                     )
                     st.session_state.full_audio_bytes = audio_bytes
                     st.success("🎉 完整音频合成完成！")
@@ -1009,7 +1118,7 @@ with col2:
                     st.success("🎉 深度提炼完成！")
 
 # --------------------------------------------------
-# 10. 结果展示区
+# 10. 结果展示区 (增加金句手动修改功能)
 # --------------------------------------------------
 if st.session_state.full_audio_bytes:
     st.divider()
@@ -1034,12 +1143,17 @@ if st.session_state.local_summary:
 
     if st.session_state.top_quote:
         with st.expander("🖼️ 查看 / 保存自动生成的【每日精华金句卡】", expanded=True):
+            edited_quote = st.text_area(
+                "✏️ 编辑卡片金句文字（可自由修改润色）：",
+                value=st.session_state.top_quote,
+                height=70
+            )
             card_style = st.selectbox(
                 "🎨 选择卡片背景风格：",
                 ["暖粉水彩", "莫兰迪绿", "天空云蓝", "复古奶茶"]
             )
             card_bytes = generate_quote_card(
-                st.session_state.top_quote, 
+                edited_quote, 
                 bg_style=card_style,
                 keywords=st.session_state.current_keywords
             )
@@ -1060,7 +1174,7 @@ if st.session_state.local_summary:
             with st.spinner("正在生成总结音频..."):
                 try:
                     summary_bytes = run_async_safe(
-                        generate_audio_bytes_safe(st.session_state.local_summary, voice_option)
+                        generate_audio_bytes_safe(st.session_state.local_summary, voice_option, rate_str)
                     )
                     st.session_state.summary_audio_bytes = summary_bytes
                     st.success("🎉 总结音频生成成功！")
