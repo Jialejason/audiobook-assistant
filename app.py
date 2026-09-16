@@ -16,8 +16,10 @@ from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
 # --------------------------------------------------
-# 0. 环境与依赖诊断 (自动接入 imageio-ffmpeg)
+# 0. 环境与依赖诊断 (自动创建标准 ffmpeg 可执行文件)
 # --------------------------------------------------
+import shutil
+
 HAS_PYDUB = False
 FFMPEG_READY = False
 FFMPEG_SOURCE = "未就绪"
@@ -29,21 +31,32 @@ except ImportError:
     pass
 
 if HAS_PYDUB:
-    # 优先尝试使用 imageio_ffmpeg 的内置二进制路径
     try:
         import imageio_ffmpeg
-        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        AudioSegment.converter = ffmpeg_exe
-        AudioSegment.ffprobe = ffmpeg_exe
-        subprocess.run([ffmpeg_exe, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        real_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        
+        # 创建临时可执行目录并将二进制文件重命名为标准 ffmpeg
+        tmp_bin_dir = "/tmp/bin"
+        os.makedirs(tmp_bin_dir, exist_ok=True)
+        tmp_ffmpeg = os.path.join(tmp_bin_dir, "ffmpeg")
+        
+        if not os.path.exists(tmp_ffmpeg):
+            shutil.copy(real_ffmpeg, tmp_ffmpeg)
+            os.chmod(tmp_ffmpeg, 0o755)
+            
+        # 注入系统 PATH 环境变量并绑定 pydub
+        os.environ["PATH"] = tmp_bin_dir + os.path.pathsep + os.environ.get("PATH", "")
+        AudioSegment.converter = tmp_ffmpeg
+        AudioSegment.ffprobe = tmp_ffmpeg
+        
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
         FFMPEG_READY = True
-        FFMPEG_SOURCE = "Python 自动解压引擎 (imageio-ffmpeg)"
+        FFMPEG_SOURCE = "imageio-ffmpeg 自动接管"
     except Exception:
-        # 备选：检测系统原生 ffmpeg
         try:
             subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
             FFMPEG_READY = True
-            FFMPEG_SOURCE = "Linux 系统原生 (packages.txt)"
+            FFMPEG_SOURCE = "Linux 系统原生 FFmpeg"
         except Exception:
             FFMPEG_READY = False
             FFMPEG_SOURCE = "未检测到 FFmpeg"
