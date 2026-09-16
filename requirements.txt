@@ -9,4 +9,3 @@ pypdf
 pydub
 jieba
 trafilatura
-ffmpeg
