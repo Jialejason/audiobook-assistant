@@ -16,50 +16,58 @@ from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
 # --------------------------------------------------
-# 0. 环境与依赖诊断 (自动创建标准 ffmpeg 可执行文件)
+# 0. 环境与依赖严格诊断 (包含原生 FFmpeg 与 imageio 适配)
 # --------------------------------------------------
+import os
+import sys
 import shutil
+import subprocess
 
 HAS_PYDUB = False
 FFMPEG_READY = False
 FFMPEG_SOURCE = "未就绪"
+FFMPEG_ERROR_MSG = ""
 
 try:
     from pydub import AudioSegment
     HAS_PYDUB = True
-except ImportError:
-    pass
+except ImportError as e:
+    FFMPEG_ERROR_MSG = f"pydub 导入失败: {e}"
 
 if HAS_PYDUB:
-    try:
-        import imageio_ffmpeg
-        real_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-        
-        # 创建临时可执行目录并将二进制文件重命名为标准 ffmpeg
-        tmp_bin_dir = "/tmp/bin"
-        os.makedirs(tmp_bin_dir, exist_ok=True)
-        tmp_ffmpeg = os.path.join(tmp_bin_dir, "ffmpeg")
-        
-        if not os.path.exists(tmp_ffmpeg):
-            shutil.copy(real_ffmpeg, tmp_ffmpeg)
-            os.chmod(tmp_ffmpeg, 0o755)
-            
-        # 注入系统 PATH 环境变量并绑定 pydub
-        os.environ["PATH"] = tmp_bin_dir + os.path.pathsep + os.environ.get("PATH", "")
-        AudioSegment.converter = tmp_ffmpeg
-        AudioSegment.ffprobe = tmp_ffmpeg
-        
-        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    # 方案 1：优先检测 Linux 系统原生安装的 ffmpeg (packages.txt)
+    ffmpeg_sys = shutil.which("ffmpeg")
+    ffprobe_sys = shutil.which("ffprobe")
+    
+    if ffmpeg_sys:
+        AudioSegment.converter = ffmpeg_sys
+        if ffprobe_sys:
+            AudioSegment.ffprobe = ffprobe_sys
         FFMPEG_READY = True
-        FFMPEG_SOURCE = "imageio-ffmpeg 自动接管"
-    except Exception:
+        FFMPEG_SOURCE = f"Linux 系统原生 ({ffmpeg_sys})"
+    else:
+        # 方案 2：若系统原生未找到，尝试接管 imageio-ffmpeg
         try:
-            subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            import imageio_ffmpeg
+            real_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+            
+            tmp_bin_dir = "/tmp/bin"
+            os.makedirs(tmp_bin_dir, exist_ok=True)
+            tmp_ffmpeg = os.path.join(tmp_bin_dir, "ffmpeg")
+            
+            if not os.path.exists(tmp_ffmpeg):
+                shutil.copy(real_ffmpeg, tmp_ffmpeg)
+                os.chmod(tmp_ffmpeg, 0o755)
+                
+            os.environ["PATH"] = tmp_bin_dir + os.path.pathsep + os.environ.get("PATH", "")
+            AudioSegment.converter = tmp_ffmpeg
+            
             FFMPEG_READY = True
-            FFMPEG_SOURCE = "Linux 系统原生 FFmpeg"
-        except Exception:
+            FFMPEG_SOURCE = "imageio-ffmpeg 引擎"
+        except Exception as err:
             FFMPEG_READY = False
-            FFMPEG_SOURCE = "未检测到 FFmpeg"
+            FFMPEG_ERROR_MSG = str(err)
+            FFMPEG_SOURCE = "未检测到可用 FFmpeg"
 
 CACHE_DIR = ".audio_cache"
 BGM_DIR = "."
