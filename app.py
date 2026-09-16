@@ -15,11 +15,20 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
+# 尝试导入 pydub 进行影音级 BGM 混音处理
+try:
+    from pydub import AudioSegment
+    HAS_PYDUB = True
+except ImportError:
+    HAS_PYDUB = False
+
 # --------------------------------------------------
-# 0. MD5 磁盘缓存目录初始化
+# 0. MD5 磁盘缓存与 BGM 目录初始化
 # --------------------------------------------------
 CACHE_DIR = ".audio_cache"
+BGM_DIR = ".bgm_library"
 os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(BGM_DIR, exist_ok=True)
 
 # 尝试导入 python-docx 与 ebooklib (扩展电子书支持)
 try:
@@ -64,14 +73,14 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手 (Global Ultimate Edition)")
 st.caption(
-    "全能旗舰版：全源深度清洗引擎 + 300+ 中英双语 AI 音色 + 倍速调节 + 全格式电子书支持"
+    "全能旗舰版：全源深度清洗引擎 + 300+ 中英双语 AI 音色 + 影音级 BGM 混音 + 倍速调节"
 )
 
 # --------------------------------------------------
-# 2. 侧边栏：Ollama (Qwen) 大模型选配设置
+# 2. 侧边栏：Ollama (Qwen) & 影音 BGM 引擎设置
 # --------------------------------------------------
 with st.sidebar:
-    st.header("⚙️ 引擎设置")
+    st.header("⚙️ 引擎与影音设置")
     use_ollama = st.checkbox(
         "🧠 启用 Ollama (Qwen) 本地大模型",
         value=False,
@@ -83,6 +92,16 @@ with st.sidebar:
         help="需先在终端运行过: ollama run qwen2.5:1.5b",
     )
     st.divider()
+    
+    # 🎵 广播剧级 BGM 混音设置
+    enable_bgm = st.checkbox(
+        "🎵 开启 BGM 沉浸式背景音乐混音",
+        value=False,
+        help="开启后将为你生成的听书音频自动叠加轻柔背景音乐，打造广播剧级的有声体验！"
+    )
+    bgm_volume = st.slider("🎚️ BGM 音量比例:", min_value=5, max_value=40, value=15, format="%d%%")
+    
+    st.divider()
     concurrency_limit = st.slider(
         "⚡ TTS 并发线程数",
         min_value=4,
@@ -92,7 +111,7 @@ with st.sidebar:
     )
 
 # --------------------------------------------------
-# 3. 核心：全源通用深度智能清洗引擎 & 章节分流器
+# 3. 核心：全源通用深度智能清洗引擎 & 伪链接过滤器
 # --------------------------------------------------
 def clean_extracted_text(text):
     """
@@ -227,7 +246,11 @@ def fetch_text_from_url(url):
         raise Exception(f"网页抓取失败: {e}")
 
 def parse_book_catalog(catalog_url):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    """
+    增强版书本目录解析引擎：
+    彻底清洗并过滤 javascript:void(0)、# 锚点以及 APP 唤醒等伪链接
+    """
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"}
     try:
         res = requests.get(catalog_url, headers=headers, timeout=12)
         res.encoding = res.apparent_encoding
@@ -239,13 +262,23 @@ def parse_book_catalog(catalog_url):
         chapters = []
         for a in soup.find_all("a", href=True):
             text = a.get_text().strip()
-            href = a['href']
-            if text and (("第" in text and "章" in text) or len(text) < 30):
-                if any(kw in text for kw in ["首页", "书架", "登录", "目录", "作者", "意见", "关于", "上一页", "下一页", "尾页", "排行榜"]):
+            href = a['href'].strip()
+            
+            # 🚨 1. 过滤 javascript: 伪链接、纯锚点与空链接
+            if not href or href.startswith("javascript:") or href == "#" or "openapp" in href.lower():
+                continue
+
+            if text and (("第" in text and "章" in text) or ("集" in text) or len(text) < 30):
+                if any(kw in text for kw in ["首页", "书架", "登录", "目录", "作者", "意见", "关于", "上一页", "下一页", "尾页", "排行榜", "打开APP"]):
                     continue
+                
                 full_url = urljoin(base_domain, href) if not href.startswith("http") else href
-                if not any(c['url'] == full_url for c in chapters):
-                    chapters.append({"title": text, "url": full_url})
+                
+                # 🚨 2. 校验协议合法性，确保非 javascript:void(0) 形式的恶意拼接
+                if full_url.startswith("http://") or full_url.startswith("https://"):
+                    if not any(c['url'] == full_url for c in chapters):
+                        chapters.append({"title": text, "url": full_url})
+
         return chapters
     except Exception as e:
         raise Exception(f"解析书本目录失败: {e}")
@@ -379,9 +412,9 @@ elif input_mode == "📚 智能分章节整本听书 (目录网址)":
                         if chapters:
                             st.session_state.book_chapters = chapters
                             st.session_state.current_chapter_idx = 0
-                            st.success(f"🎉 目录解析成功！共发现 {len(chapters)} 个章节。")
+                            st.success(f"🎉 目录解析成功！共发现 {len(chapters)} 个有效章节。")
                         else:
-                            st.warning("未能在该网址中自动提取到章节目录，请尝试换一个源或直接使用单页网址。")
+                            st.warning("未能在该网址中自动提取到有效的文字章节目录。如为有声电台网站（如蜻蜓FM），请直接复制代码文本播放。")
                     except Exception as e:
                         st.error(f"{e}")
             else:
@@ -582,7 +615,7 @@ rate_percentage = int(round((speech_rate_val - 1.0) * 100))
 rate_str = f"{rate_percentage:+d}%"
 
 # --------------------------------------------------
-# 6. 🚀 高性能并发 TTS 合成 + MD5 磁盘缓存引擎
+# 6. 🚀 高性能并发 TTS 合成 + MD5 缓存 + BGM 混音引擎
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -620,7 +653,6 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem):
     chunk_hash = hashlib.md5(f"{chunk}_{voice}_{rate_str}".encode('utf-8')).hexdigest()
     cache_file = os.path.join(CACHE_DIR, f"{chunk_hash}.mp3")
     
-    # 命中 MD5 缓存直接从磁盘读取（秒刷）
     if os.path.exists(cache_file):
         try:
             with open(cache_file, "rb") as f:
@@ -657,8 +689,46 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem):
                 pass
         return res_bytes
 
-async def generate_audio_bytes_parallel(text, voice, rate_str="+0%", max_concurrency=10):
-    """多线程并发语音合成 (5-8倍速提升)"""
+def mix_bgm_with_audio(speech_bytes, volume_percent=15):
+    """广播剧级 BGM 混音器 (使 TTS 音频具备影音听书质感)"""
+    if not HAS_PYDUB or not speech_bytes:
+        return speech_bytes
+
+    try:
+        speech = AudioSegment.from_file(io.BytesIO(speech_bytes), format="mp3")
+        speech_duration = len(speech)
+
+        # 检查或生成优雅轻音乐 BGM
+        bgm_path = os.path.join(BGM_DIR, "gentle_bgm.mp3")
+        if not os.path.exists(bgm_path):
+            # 创建一段柔和的琴音/舒缓音频作为默认 BGM
+            from pydub.generators import Sine
+            tone1 = Sine(261.63).to_audio_segment(duration=speech_duration + 2000).fade_in(1000).fade_out(1000)
+            tone2 = Sine(329.63).to_audio_segment(duration=speech_duration + 2000).fade_in(1000).fade_out(1000)
+            bgm = tone1.overlay(tone2) - 25
+            bgm.export(bgm_path, format="mp3")
+        else:
+            bgm = AudioSegment.from_file(bgm_path, format="mp3")
+
+        # 让 BGM 循环匹配人声长度
+        if len(bgm) < speech_duration:
+            loops_needed = (speech_duration // len(bgm)) + 1
+            bgm = bgm * loops_needed
+
+        bgm = bgm[:speech_duration].fade_in(1500).fade_out(1500)
+        # 根据百分比降低 BGM 音量，突出人声
+        volume_db = -30 + (volume_percent * 0.5)
+        bgm = bgm + volume_db
+
+        mixed = speech.overlay(bgm)
+        output_io = io.BytesIO()
+        mixed.export(output_io, format="mp3")
+        return output_io.getvalue()
+    except Exception:
+        return speech_bytes
+
+async def generate_audio_bytes_parallel(text, voice, rate_str="+0%", max_concurrency=10, apply_bgm=False, volume_pct=15):
+    """多线程并发语音合成 + 影音 BGM 混音"""
     clean_text = clean_markdown_for_speech(text)
     chunks = split_text_chunks_safe(clean_text)
     if not chunks:
@@ -686,7 +756,13 @@ async def generate_audio_bytes_parallel(text, voice, rate_str="+0%", max_concurr
     for r in results:
         if r:
             full_audio.extend(r)
-    return bytes(full_audio)
+            
+    final_bytes = bytes(full_audio)
+    if apply_bgm and HAS_PYDUB:
+        with st.spinner("🎵 正在注入 BGM 沉浸式背景音乐..."):
+            final_bytes = mix_bgm_with_audio(final_bytes, volume_pct)
+
+    return final_bytes
 
 # --------------------------------------------------
 # 7. 跨平台自适应字库引擎与金句卡片生成
@@ -861,17 +937,24 @@ if "summary_audio_bytes" not in st.session_state:
 col1, col2 = st.columns(2)
 
 with col1:
-    if st.button("🚀 生成完整音频 (10并发/MD5缓存)", type="primary", use_container_width=True):
+    if st.button("🚀 生成完整音频 (10并发/BGM混音)", type="primary", use_container_width=True):
         if not active_process_text.strip():
             st.warning("请先加载章节或粘贴文本！")
         else:
             with st.spinner("正在并发合成高保真音频..."):
                 try:
                     audio_bytes = run_async_safe(
-                        generate_audio_bytes_parallel(active_process_text, voice_option, rate_str, concurrency_limit)
+                        generate_audio_bytes_parallel(
+                            active_process_text, 
+                            voice_option, 
+                            rate_str, 
+                            concurrency_limit,
+                            apply_bgm=enable_bgm,
+                            volume_pct=bgm_volume
+                        )
                     )
                     st.session_state.full_audio_bytes = audio_bytes
-                    st.success("🎉 完整音频合成/缓存读取完成！")
+                    st.success("🎉 完整音频合成/混音完成！")
                 except Exception as e:
                     st.error(f"生成失败: {e}")
 
@@ -959,7 +1042,14 @@ if st.session_state.local_summary:
             with st.spinner("正在生成总结音频..."):
                 try:
                     summary_bytes = run_async_safe(
-                        generate_audio_bytes_parallel(st.session_state.local_summary, voice_option, rate_str, concurrency_limit)
+                        generate_audio_bytes_parallel(
+                            st.session_state.local_summary, 
+                            voice_option, 
+                            rate_str, 
+                            concurrency_limit,
+                            apply_bgm=enable_bgm,
+                            volume_pct=bgm_volume
+                        )
                     )
                     st.session_state.summary_audio_bytes = summary_bytes
                     st.success("🎉 总结音频生成成功！")
