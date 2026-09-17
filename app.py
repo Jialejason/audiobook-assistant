@@ -656,7 +656,7 @@ if len(raw_text) > 8000:
     active_process_text = auto_chapters[selected_ch_idx]["content"]
 
 # --------------------------------------------------
-# 7. TTS 合成 + 高通滤波 + 动态闪避 (已修正 dbFS 属性 Bug)
+# 7. TTS 合成 + 高通滤波 + 动态闪避
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -732,7 +732,6 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem=None):
     else:
         return await do_synth()
 
-# 🌟 修复关键：将 speech_chunk.dbfs 修改为正确的 Pydub 属性 speech_chunk.dbFS
 def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
     if not HAS_PYDUB or not FFMPEG_READY or not speech_bytes:
         return speech_bytes
@@ -777,8 +776,9 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
             speech_chunk = speech[i:i+chunk_ms]
             bgm_chunk = bgm[i:i+chunk_ms]
 
-            # ✅ 此处已修正为 dbFS (Decibels relative to Full Scale)
-            target_duck = -6.0 if speech_chunk.dbFS > -42.0 else 0.0
+            # ✅ 核心修复：Pydub 官方标准属性名为 dBFS (Capital B, F, S)
+            chunk_db = speech_chunk.dBFS
+            target_duck = -6.0 if (chunk_db is not None and chunk_db > -42.0) else 0.0
             current_duck = current_duck * 0.7 + target_duck * 0.3
 
             adjusted_chunk = bgm_chunk.apply_gain(bgm_base_gain + current_duck)
@@ -940,6 +940,7 @@ def render_custom_media_player(audio_bytes, title="完整文章听书 / 广播�
 def get_chinese_font(font_size=20):
     paths = [
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
         "C:/Windows/Fonts/msyh.ttc",
         "/System/Library/Fonts/PingFang.ttc"
