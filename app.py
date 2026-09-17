@@ -139,30 +139,30 @@ st.set_page_config(
 
 st.title("🎧 随身听书 & 思维助手 (Global Ultimate Edition)")
 st.caption(
-    "全能旗舰版：全自动男女多角色对话 + 80Hz高通滤波 + 动态闪避混音(Audio Ducking) + 锁屏 Media Session 响应"
+    "全能旗舰版：支持单人专注听书/多角色广播剧 + 80Hz高通滤波 + 动态闪避混音(Audio Ducking) + 锁屏 Media Session 响应"
 )
 
 # --------------------------------------------------
-# 2. 侧边栏：广播剧、引擎与影音 BGM 设置
+# 2. 侧边栏：朗读模式、引擎与影音 BGM 设置
 # --------------------------------------------------
 with st.sidebar:
-    st.header("⚙️ 引擎与影音设置")
+    st.header("⚙️ 朗读模式与引擎设置")
     
+    # 🌟 核心升级：明确解封单人朗读与多角色广播剧模式
+    audio_mode = st.radio(
+        "🎙️ 选择音频合成模式：",
+        ["🎙️ 单人沉浸朗读 (专注听书)", "🎭 全自动 AI 广播剧 (男女多角色)"],
+        index=0,
+        help="【单人沉浸朗读】：使用单一精选音色贯穿全文，适合新闻、文章、书籍与记录片，完全支持所有导入内容！\n【全自动 AI 广播剧】：自动识别文中对话并分配男女声交替朗读，适合故事与小说。"
+    )
+    enable_multi_role = (audio_mode == "🎭 全自动 AI 广播剧 (男女多角色)")
+
+    st.divider()
+
     if HAS_PYDUB and FFMPEG_READY:
         st.success(f"✅ BGM / 多角色混音引擎就绪\n({FFMPEG_SOURCE})")
     else:
         st.error(f"❌ BGM 混音受阻：未检测到 FFmpeg！\n(详情: {FFMPEG_ERROR_MSG if FFMPEG_ERROR_MSG else '路径检测失败'})")
-        st.info("💡 解决办法：请确认 packages.txt 中包含 `ffmpeg`，或在 requirements.txt 中添加 `imageio-ffmpeg`。")
-
-    st.divider()
-    
-    enable_multi_role = st.checkbox(
-        "🎭 开启全自动 AI 广播剧 (男女多角色对话模式)",
-        value=True,
-        help="开启后系统将自动识别文中旁白、男主、女主对白，并自动分配不同音色交替朗读！"
-    )
-    
-    st.divider()
 
     enable_bgm = st.checkbox(
         "🎵 开启 BGM 沉浸式背景音乐混音",
@@ -461,7 +461,7 @@ def parse_multi_role_script(text):
     return parsed_script
 
 # --------------------------------------------------
-# 5. 音色选择
+# 5. 音色选择配置
 # --------------------------------------------------
 @st.cache_resource
 def fetch_all_global_voices():
@@ -484,13 +484,14 @@ def fetch_all_global_voices():
 active_voice_dict = fetch_all_global_voices() if show_all_voices else CURATED_VOICES
 voice_keys = list(active_voice_dict.keys())
 
-st.markdown("##### 🎛️ 音质属性与角色音色配置")
+st.markdown("##### 🎛️ 音质属性与朗读音色配置")
 
 default_narrator = "zh-CN-YunjianNeural" if "zh-CN-YunjianNeural" in voice_keys else voice_keys[0]
 default_male = "zh-CN-YunxiNeural" if "zh-CN-YunxiNeural" in voice_keys else voice_keys[0]
 default_female = "zh-CN-XiaoxiaoNeural" if "zh-CN-XiaoxiaoNeural" in voice_keys else voice_keys[0]
 
 if enable_multi_role:
+    st.info("🎭 当前已启用 **全自动 AI 广播剧** 模式（对白与旁白分角色朗读）")
     r_col1, r_col2, r_col3 = st.columns(3)
     with r_col1:
         voice_narrator = st.selectbox("📖 旁白音色：", options=voice_keys, index=voice_keys.index(default_narrator) if default_narrator in voice_keys else 0, format_func=lambda x: active_voice_dict.get(x, x))
@@ -500,9 +501,10 @@ if enable_multi_role:
         voice_female = st.selectbox("👩 女主/女声对白：", options=voice_keys, index=voice_keys.index(default_female) if default_female in voice_keys else 0, format_func=lambda x: active_voice_dict.get(x, x))
     voice_option = voice_narrator
 else:
+    st.info("🎙️ 当前已启用 **单人沉浸朗读** 模式（全篇文章使用单一专业音色）")
     speech_col1, speech_col2 = st.columns([2, 1])
     with speech_col1:
-        voice_option = st.selectbox("选择朗读音色：", options=voice_keys, index=0, format_func=lambda x: active_voice_dict.get(x, x))
+        voice_option = st.selectbox("🎙️ 选择贯穿全文的朗读音色：", options=voice_keys, index=voice_keys.index(default_narrator) if default_narrator in voice_keys else 0, format_func=lambda x: active_voice_dict.get(x, x))
     voice_narrator, voice_male, voice_female = voice_option, voice_option, voice_option
 
 speech_rate_val = st.slider("⚡ 播放语速：", min_value=0.5, max_value=2.0, value=1.0, step=0.1, format="%.1fx")
@@ -510,7 +512,7 @@ rate_percentage = int(round((speech_rate_val - 1.0) * 100))
 rate_str = f"{rate_percentage:+d}%"
 
 # --------------------------------------------------
-# 6. 输入界面
+# 6. 输入界面（画圈四大导入方式完全解包平权）
 # --------------------------------------------------
 st.subheader("📥 导入阅读内容")
 input_mode = st.radio(
@@ -655,7 +657,7 @@ if len(raw_text) > 8000:
     active_process_text = auto_chapters[selected_ch_idx]["content"]
 
 # --------------------------------------------------
-# 7. TTS 合成 + 高通滤波 + 动态闪避 (Audio Ducking)
+# 7. TTS 合成 + 高通滤波 + 动态闪避 (Audio Ducking 彻底修复版)
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -731,9 +733,9 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem=None):
     else:
         return await do_synth()
 
+# 🌟 核心升级：彻底修复 Pydub 动态闪避混音 Bug
 def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
     if not HAS_PYDUB or not FFMPEG_READY or not speech_bytes:
-        st.warning("⚠️ BGM 混音跳过：pydub 库未就绪或未检测到 FFmpeg。")
         return speech_bytes
 
     try:
@@ -754,9 +756,9 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
             bgm = AudioSegment.from_file(bgm_path, format="mp3")
         else:
             from pydub.generators import Sine
-            tone1 = Sine(261.63).to_audio_segment(duration=speech_duration + 2000) - 35
-            tone2 = Sine(329.63).to_audio_segment(duration=speech_duration + 2000) - 35
-            tone3 = Sine(392.00).to_audio_segment(duration=speech_duration + 2000) - 35
+            tone1 = Sine(261.63).to_audio_segment(duration=max(speech_duration + 2000, 5000)) - 35
+            tone2 = Sine(329.63).to_audio_segment(duration=max(speech_duration + 2000, 5000)) - 35
+            tone3 = Sine(392.00).to_audio_segment(duration=max(speech_duration + 2000, 5000)) - 35
             bgm = tone1.overlay(tone2).overlay(tone3)
 
         bgm = bgm.set_frame_rate(speech.frame_rate).set_channels(speech.channels)
@@ -768,27 +770,32 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
         bgm = bgm[:speech_duration].fade_in(1000).fade_out(1000)
 
         bgm_base_gain = -38.0 + (volume_percent * 0.4)
-        chunk_ms = 100
-        ducked_bgm = AudioSegment.empty()
+        chunk_ms = 200
+        ducked_chunks = []
         current_duck = 0.0
 
         for i in range(0, speech_duration, chunk_ms):
             speech_chunk = speech[i:i+chunk_ms]
             bgm_chunk = bgm[i:i+chunk_ms]
 
-            if speech_chunk.dbfs > -42.0:
-                target_duck = -5.0
-            else:
-                target_duck = 0.0
+            target_duck = -6.0 if speech_chunk.dbfs > -42.0 else 0.0
+            current_duck = current_duck * 0.7 + target_duck * 0.3
 
-            current_duck = current_duck * 0.6 + target_duck * 0.4
-            ducked_bgm += bgm_chunk + (bgm_base_gain + current_duck)
+            adjusted_chunk = bgm_chunk.apply_gain(bgm_base_gain + current_duck)
+            ducked_chunks.append(adjusted_chunk)
+
+        if ducked_chunks:
+            ducked_bgm = ducked_chunks[0]
+            for c in ducked_chunks[1:]:
+                ducked_bgm += c
+        else:
+            ducked_bgm = bgm.apply_gain(bgm_base_gain)
 
         mixed = speech.overlay(ducked_bgm)
         output_io = io.BytesIO()
         mixed.export(output_io, format="mp3")
         
-        st.success(f"🎵 极致混音完成：已注入 80Hz 高通滤波与动态闪避 (Audio Ducking)！")
+        st.success("🎵 极致混音完成：已注入 80Hz 高通滤波与动态闪避 (Audio Ducking)！")
         return output_io.getvalue()
     except Exception as e:
         st.error(f"❌ 混音崩溃报错详情: {e}")
@@ -847,7 +854,7 @@ async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_fem
             final_bytes = b"".join([b for b in audio_segments_pydub if isinstance(b, bytes)])
     else:
         chunks = split_text_chunks_safe(clean_text)
-        progress_bar = st.progress(0, text=f"⚡ 正在启动 {max_concurrency} 线程并发合成...")
+        progress_bar = st.progress(0, text=f"⚡ 正在启动 {max_concurrency} 线程并发合成单人音频...")
         
         async def worker(idx, chunk):
             data = await synth_single_chunk_cached(chunk, v_narrator, rate_str, sem)
@@ -861,7 +868,7 @@ async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_fem
             idx, data = await f
             results[idx] = data
             completed += 1
-            progress_bar.progress(completed / len(chunks), text=f"⚡ 合成进度 ({completed}/{len(chunks)} 段)...")
+            progress_bar.progress(completed / len(chunks), text=f"⚡ 单人音频合成进度 ({completed}/{len(chunks)} 段)...")
 
         progress_bar.empty()
         full_audio = bytearray()
@@ -903,7 +910,7 @@ def render_custom_media_player(audio_bytes, title="完整文章听书 / 广播�
             navigator.mediaSession.metadata = new MediaMetadata({{
                 title: {json.dumps(current_chapter_title)},
                 artist: {json.dumps(artist)},
-                album: "AI 广播剧全能版",
+                album: "AI 听书全能版",
                 artwork: [
                     {{ src: 'https://cdn-icons-png.flaticon.com/512/3039/3039387.png', sizes: '512x512', type: 'image/png' }}
                 ]
@@ -1099,7 +1106,7 @@ if "summary_audio_bytes" not in st.session_state:
 col1, col2 = st.columns(2)
 
 with col1:
-    btn_label = "🚀 生成完整广播剧/听书音频" if enable_multi_role else "🚀 生成完整音频 (10并发/BGM混音)"
+    btn_label = "🚀 生成全自动 AI 广播剧" if enable_multi_role else "🚀 生成单人沉浸听书音频"
     if st.button(btn_label, type="primary", use_container_width=True):
         if not active_process_text.strip():
             st.warning("请先加载章节或粘贴文本！")
@@ -1121,7 +1128,7 @@ with col1:
                         )
                     )
                     st.session_state.full_audio_bytes = audio_bytes
-                    st.success("🎉 完整音频合成/混音完成！")
+                    st.success("🎉 音频合成/混音完成！")
                 except Exception as e:
                     st.error(f"生成失败: {e}")
 
@@ -1157,8 +1164,8 @@ with col2:
 # --------------------------------------------------
 if st.session_state.full_audio_bytes:
     st.divider()
-    st.subheader("🎧 完整文章听书 / 广播剧")
-    render_custom_media_player(st.session_state.full_audio_bytes, title="广播剧 / 听书", artist="随身听书 & 思维助手")
+    st.subheader("🎧 听书 / 广播剧音频播放器")
+    render_custom_media_player(st.session_state.full_audio_bytes, title="听书 / 广播剧", artist="随身听书 & 思维助手")
     st.download_button(
         "📥 下载完整 MP3",
         data=st.session_state.full_audio_bytes,
