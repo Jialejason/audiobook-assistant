@@ -75,6 +75,31 @@ CACHE_DIR = ".audio_cache"
 BGM_DIR = "."
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+# --------------------------------------------------
+# 🧹 自动缓存清理（预防磁盘/内存溢出）
+# --------------------------------------------------
+def cleanup_cache_if_needed(max_size_mb=200):
+    if not os.path.exists(CACHE_DIR):
+        return
+    try:
+        files_with_size = [
+            (os.path.join(CACHE_DIR, f), os.path.getsize(os.path.join(CACHE_DIR, f)))
+            for f in os.listdir(CACHE_DIR)
+            if os.path.isfile(os.path.join(CACHE_DIR, f))
+        ]
+        total_size = sum(size for _, size in files_with_size)
+        if total_size > max_size_mb * 1024 * 1024:
+            files_sorted = sorted(files_with_size, key=lambda x: os.path.getmtime(x[0]))
+            for file_path, _ in files_sorted[: len(files_sorted) // 2]:
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+cleanup_cache_if_needed(200)
+
 try:
     import docx
     HAS_DOCX = True
@@ -131,15 +156,54 @@ LOCALE_LANG_MAP = {'zh-CN': ('中文普通话', 'Mandarin'), 'en-US': ('美式�
 LOCALE_FLAGS = {'zh-CN': '🇨🇳', 'en-US': '🇺🇸', 'ja-JP': '🇯🇵'}
 
 # --------------------------------------------------
-# 1. 页面配置
+# 1. 页面配置与 PWA 客户端化注入
 # --------------------------------------------------
 st.set_page_config(
-    page_title="随身听书 & 思维助手 (AI广播剧全能版)", page_icon="🎧", layout="centered"
+    page_title="随身听书 & 思维助手 (PWA全能版)", page_icon="🎧", layout="centered"
 )
 
-st.title("🎧 随身听书 & 思维助手 (Global Ultimate Edition)")
+# 动态注入 PWA Manifest 和移动端锁屏后台保活 JS
+pwa_js = """
+<script>
+    (function() {
+        const manifest = {
+            "name": "随身听书 & 思维助手",
+            "short_name": "AI听书",
+            "start_url": ".",
+            "display": "standalone",
+            "background_color": "#0f172a",
+            "theme_color": "#38bdf8",
+            "icons": [{
+                "src": "https://cdn-icons-png.flaticon.com/512/3039/3039387.png",
+                "sizes": "512x512",
+                "type": "image/png"
+            }]
+        };
+        const stringManifest = JSON.stringify(manifest);
+        const blob = new Blob([stringManifest], {type: 'application/json'});
+        const manifestURL = URL.createObjectURL(blob);
+        let link = document.createElement('link');
+        link.rel = 'manifest';
+        link.href = manifestURL;
+        document.head.appendChild(link);
+
+        let metaCapable = document.createElement('meta');
+        metaCapable.name = "mobile-web-app-capable";
+        metaCapable.content = "yes";
+        document.head.appendChild(metaCapable);
+
+        let metaApple = document.createElement('meta');
+        metaApple.name = "apple-mobile-web-app-capable";
+        metaApple.content = "yes";
+        document.head.appendChild(metaApple);
+    })();
+</script>
+"""
+st.components.v1.html(pwa_js, height=0)
+
+st.title("🎧 随身听书 & 思维助手 (PWA Ultimate Edition)")
 st.caption(
-    "全能旗舰版：支持单人专注听书/多角色广播剧 + 80Hz高通滤波 + 动态闪避混音(Audio Ducking) + 锁屏 Media Session 响应"
+    "全能旗舰版：支持单人听书/多角色广播剧 + PWA 桌面独立应用 + 动态闪避混音(Audio Ducking) + 锁屏后台播放"
 )
 
 # --------------------------------------------------
@@ -417,13 +481,13 @@ def run_async_safe(coroutine):
             loop.close()
 
 # --------------------------------------------------
-# 4. 🧠 广播剧剧本拆分器
+# 4. 🧠 广播剧剧本拆分器 (启发式算法全面增强)
 # --------------------------------------------------
 def parse_multi_role_script(text):
-    male_keywords = ["他", "男", "先生", "少爷", "爸爸", "父亲", "爷爷", "哥", "叔", "师父", "队长", "老者", "皇上", "兄"]
-    female_keywords = ["她", "女", "小姐", "夫人", "妈妈", "母亲", "奶奶", "姐", "妹", "姨", "师姐", "丫头", "皇后", "娘"]
+    male_keywords = ["他", "男", "先生", "少爷", "爸爸", "父亲", "爷爷", "哥", "叔", "师父", "队长", "老者", "皇上", "兄", "师兄", "老道", "少年", "汉子", "小哥", "老头", "王", "爷", "老兄", "叔叔", "叔父"]
+    female_keywords = ["她", "女", "小姐", "夫人", "妈妈", "母亲", "奶奶", "姐", "妹", "姨", "师姐", "丫头", "皇后", "娘", "姑娘", "少女", "大娘", "阿姨", "嫂", "妹妹", "姐姐", "媳妇", "婆婆"]
 
-    pattern = r'(“.*?”|"[^"]*")'
+    pattern = r'(“.*?”|"[^"]*"|「.*?」|『.*?』)'
     raw_segments = re.split(pattern, text)
     
     parsed_script = []
@@ -435,13 +499,21 @@ def parse_multi_role_script(text):
         if not s:
             continue
             
-        if (s.startswith("“") and s.endswith("”")) or (s.startswith('"') and s.endswith('"')):
+        is_quote = (
+            (s.startswith("“") and s.endswith("”")) or 
+            (s.startswith('"') and s.endswith('"')) or
+            (s.startswith("「") and s.endswith("」")) or
+            (s.startswith("『") and s.endswith("』"))
+        )
+
+        if is_quote:
             dialogue_text = s[1:-1].strip()
             if not dialogue_text:
                 continue
                 
-            is_male = any(kw in last_context for kw in male_keywords)
-            is_female = any(kw in last_context for kw in female_keywords)
+            speaker_ctx = last_context[-25:]
+            is_male = any(kw in speaker_ctx for kw in male_keywords)
+            is_female = any(kw in speaker_ctx for kw in female_keywords)
             
             if is_male and not is_female:
                 role = "MALE"
@@ -455,7 +527,7 @@ def parse_multi_role_script(text):
             last_context = ""
         else:
             parsed_script.append(("NARRATOR", s))
-            last_context = s[-20:]
+            last_context = s
 
     return parsed_script
 
@@ -656,7 +728,7 @@ if len(raw_text) > 8000:
     active_process_text = auto_chapters[selected_ch_idx]["content"]
 
 # --------------------------------------------------
-# 7. TTS 合成 + 高通滤波 + 动态闪避
+# 7. TTS 合成 + 高通滤波 + 动态闪避混音引擎
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -720,6 +792,7 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem=None):
         res_bytes = bytes(audio_data)
         if len(res_bytes) > 0:
             try:
+                cleanup_cache_if_needed(200)
                 with open(cache_file, "wb") as f:
                     f.write(res_bytes)
             except Exception:
@@ -768,7 +841,7 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
         bgm = bgm[:speech_duration].fade_in(1000).fade_out(1000)
 
         bgm_base_gain = -38.0 + (volume_percent * 0.4)
-        chunk_ms = 200
+        chunk_ms = 250
         ducked_chunks = []
         current_duck = 0.0
 
@@ -776,7 +849,6 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
             speech_chunk = speech[i:i+chunk_ms]
             bgm_chunk = bgm[i:i+chunk_ms]
 
-            # ✅ 核心修复：Pydub 官方标准属性名为 dBFS (Capital B, F, S)
             chunk_db = speech_chunk.dBFS
             target_duck = -6.0 if (chunk_db is not None and chunk_db > -42.0) else 0.0
             current_duck = current_duck * 0.7 + target_duck * 0.3
@@ -787,15 +859,16 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
         if ducked_chunks:
             ducked_bgm = ducked_chunks[0]
             for c in ducked_chunks[1:]:
-                ducked_bgm += c
+                ducked_bgm = ducked_bgm.append(c, crossfade=15)
         else:
             ducked_bgm = bgm.apply_gain(bgm_base_gain)
 
+        ducked_bgm = ducked_bgm[:speech_duration]
         mixed = speech.overlay(ducked_bgm)
         output_io = io.BytesIO()
         mixed.export(output_io, format="mp3")
         
-        st.success("🎵 极致混音完成：已注入 80Hz 高通滤波与动态闪避 (Audio Ducking)！")
+        st.success("🎵 极致混音完成：已注入 80Hz 高通滤波与平滑动态闪避 (Audio Ducking)！")
         return output_io.getvalue()
     except Exception as e:
         st.error(f"❌ 混音崩溃报错详情: {e}")
@@ -884,7 +957,7 @@ async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_fem
     return final_bytes
 
 # --------------------------------------------------
-# 8. 金句卡片生成引擎与 Media Session 组件
+# 8. 金句卡片生成引擎与 Media Session + WakeLock 锁屏保活组件
 # --------------------------------------------------
 def render_custom_media_player(audio_bytes, title="完整文章听书 / 广播剧", artist="随身听书 & 思维助手"):
     b64_audio = base64.b64encode(audio_bytes).decode('utf-8')
@@ -906,6 +979,16 @@ def render_custom_media_player(audio_bytes, title="完整文章听书 / 广播�
     <script>
         const audio = document.getElementById('custom-audio-player');
         
+        // PWA 锁屏保活及 Media Session 控制
+        let wakeLock = null;
+        async function requestWakeLock() {{
+            try {{
+                if ('wakeLock' in navigator) {{
+                    wakeLock = await navigator.wakeLock.request('screen');
+                }}
+            }} catch (err) {{}}
+        }}
+
         if ('mediaSession' in navigator) {{
             navigator.mediaSession.metadata = new MediaMetadata({{
                 title: {json.dumps(current_chapter_title)},
@@ -927,9 +1010,13 @@ def render_custom_media_player(audio_bytes, title="完整文章听书 / 广播�
         }}
 
         audio.addEventListener('play', () => {{
+            requestWakeLock();
             if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
         }});
         audio.addEventListener('pause', () => {{
+            if (wakeLock !== null) {{
+                wakeLock.release().then(() => {{ wakeLock = null; }});
+            }}
             if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
         }});
     </script>
@@ -1017,13 +1104,15 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
     return img_byte_arr.getvalue()
 
 # --------------------------------------------------
-# 9. 知识提炼
+# 9. 知识提炼引擎 (含前缀清洗与异常符号去除)
 # --------------------------------------------------
 def clean_sentence_prefix(sentence):
     cleaned = sentence.strip()
+    cleaned = re.sub(r'^[”"“\'’`\s]+', '', cleaned)
     patterns = [r"^(?:[0-9一二三四五六七八九十]+[.\s、]|核心观点|观点|总结|总之|首先|其次|最后)[：:\s]*"]
     for p in patterns:
         cleaned = re.sub(p, "", cleaned)
+    cleaned = re.sub(r'^[”"“\'’`\s]+', '', cleaned)
     return cleaned.strip()
 
 def is_noise_or_heading(sentence):
@@ -1161,7 +1250,7 @@ with col2:
                     st.success("🎉 深度提炼完成！")
 
 # --------------------------------------------------
-# 11. 结果展示区 (集成 Media Session 支持)
+# 11. 结果展示区 (集成 Media Session 与 完美文本导出)
 # --------------------------------------------------
 if st.session_state.full_audio_bytes:
     st.divider()
@@ -1236,9 +1325,14 @@ if st.session_state.local_summary:
                     st.error(f"生成失败: {e}")
 
     with sub_col2:
+        export_text = ""
+        if st.session_state.top_quote:
+            export_text += f"📌 一句话精髓：\n“ {st.session_state.top_quote} ”\n\n"
+        export_text += st.session_state.local_summary
+
         st.download_button(
             label="💾 保存每日笔记 (.txt)",
-            data=st.session_state.local_summary,
+            data=export_text,
             file_name="daily_knowledge_note.txt",
             mime="text/plain",
             use_container_width=True,
