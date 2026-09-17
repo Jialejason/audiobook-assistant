@@ -481,13 +481,14 @@ def run_async_safe(coroutine):
             loop.close()
 
 # --------------------------------------------------
-# 4. 🧠 广播剧剧本拆分器 (启发式算法全面增强)
+# 4. 🧠 广播剧剧本拆分器 (支持多行换行与精准角色识别)
 # --------------------------------------------------
 def parse_multi_role_script(text):
     male_keywords = ["他", "男", "先生", "少爷", "爸爸", "父亲", "爷爷", "哥", "叔", "师父", "队长", "老者", "皇上", "兄", "师兄", "老道", "少年", "汉子", "小哥", "老头", "王", "爷", "老兄", "叔叔", "叔父"]
-    female_keywords = ["她", "女", "小姐", "夫人", "妈妈", "母亲", "奶奶", "姐", "妹", "姨", "师姐", "丫头", "皇后", "娘", "姑娘", "少女", "大娘", "阿姨", "嫂", "妹妹", "姐姐", "媳妇", "婆婆"]
+    female_keywords = ["她", "女", "小姐", "夫人", "妈妈", "母亲", "奶奶", "姐", "妹", "姨", "师姐", "丫头", "皇后", "娘", "姑娘", "少女", "大娘", "阿姨", "嫂", "妹妹", "姐姐", "媳妇", "婆婆", "妹子"]
 
-    pattern = r'(“.*?”|"[^"]*"|「.*?」|『.*?』)'
+    # 使用 [\s\S] 确保正则正确包含带有换行符的多行对话
+    pattern = r'(“[\s\S]*?”|"[^"]*"|「[\s\S]*?」|『[\s\S]*?』)'
     raw_segments = re.split(pattern, text)
     
     parsed_script = []
@@ -511,7 +512,7 @@ def parse_multi_role_script(text):
             if not dialogue_text:
                 continue
                 
-            speaker_ctx = last_context[-25:]
+            speaker_ctx = last_context[-35:]
             is_male = any(kw in speaker_ctx for kw in male_keywords)
             is_female = any(kw in speaker_ctx for kw in female_keywords)
             
@@ -959,7 +960,7 @@ async def generate_radio_drama_or_standard_audio(text, v_narrator, v_male, v_fem
 # --------------------------------------------------
 # 8. 金句卡片生成引擎与 Media Session + WakeLock 锁屏保活组件
 # --------------------------------------------------
-def render_custom_media_player(audio_bytes, title="完整文章听书 / 广播剧", artist="随身听书 & 思维助手"):
+def render_custom_media_player(audio_bytes, title="完整文章听书 / 广播剧", artist="随身听书 & 思维助手", player_key="main"):
     b64_audio = base64.b64encode(audio_bytes).decode('utf-8')
     audio_data_url = f"data:audio/mp3;base64,{b64_audio}"
     
@@ -971,13 +972,13 @@ def render_custom_media_player(audio_bytes, title="完整文章听书 / 广播�
 
     html_code = f"""
     <div style="width: 100%; text-align: center; margin: 5px 0;">
-        <audio id="custom-audio-player" controls autoplay style="width: 100%; max-width: 650px; height: 48px; border-radius: 8px;">
+        <audio id="custom-audio-player-{player_key}" controls autoplay style="width: 100%; max-width: 650px; height: 48px; border-radius: 8px;">
             <source src="{audio_data_url}" type="audio/mp3">
             您的浏览器不支持 HTML5 音频播放。
         </audio>
     </div>
     <script>
-        const audio = document.getElementById('custom-audio-player');
+        const audio = document.getElementById('custom-audio-player-{player_key}');
         
         // PWA 锁屏保活及 Media Session 控制
         let wakeLock = null;
@@ -1041,13 +1042,16 @@ def get_chinese_font(font_size=20):
     return ImageFont.load_default()
 
 def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
-    quote_len = len(quote_text)
+    clean_quote = re.sub(r'\*\*(.*?)\*\*', r'\1', quote_text)
+    clean_quote = re.sub(r'`(.*?)`', r'\1', clean_quote)
+    
+    quote_len = len(clean_quote)
     font_size, chars_per_line, line_height = (22, 20, 40) if quote_len <= 35 else (18, 24, 34)
     font_title, font_quote = get_chinese_font(20), get_chinese_font(font_size)
     font_footer, font_badge, font_big = get_chinese_font(13), get_chinese_font(13), get_chinese_font(70)
 
     lines, line = [], ""
-    for char in quote_text:
+    for char in clean_quote:
         line += char
         if len(line) >= chars_per_line:
             lines.append(line)
@@ -1089,7 +1093,7 @@ def generate_quote_card(quote_text, bg_style="暖粉水彩", keywords=None):
         x_badge = margin + 45
         y_badge = height - margin - 75
         for kw in keywords[:3]:
-            tag_text = f"#{kw}"
+            tag_text = f"#{kw.replace('#', '')}"
             bbox = draw.textbbox((0, 0), tag_text, font=font_badge)
             w = bbox[2] - bbox[0] + 18
             draw.rounded_rectangle([x_badge, y_badge, x_badge + w, y_badge + 28], radius=10, fill=s["badge_bg"])
@@ -1250,12 +1254,12 @@ with col2:
                     st.success("🎉 深度提炼完成！")
 
 # --------------------------------------------------
-# 11. 结果展示区 (集成 Media Session 与 完美文本导出)
+# 11. 结果展示区 (防乱码 UTF-8-SIG 导出与 HTML 播放器)
 # --------------------------------------------------
 if st.session_state.full_audio_bytes:
     st.divider()
     st.subheader("🎧 听书 / 广播剧音频播放器")
-    render_custom_media_player(st.session_state.full_audio_bytes, title="听书 / 广播剧", artist="随身听书 & 思维助手")
+    render_custom_media_player(st.session_state.full_audio_bytes, title="听书 / 广播剧", artist="随身听书 & 思维助手", player_key="full")
     st.download_button(
         "📥 下载完整 MP3",
         data=st.session_state.full_audio_bytes,
@@ -1325,21 +1329,30 @@ if st.session_state.local_summary:
                     st.error(f"生成失败: {e}")
 
     with sub_col2:
-        export_text = ""
+        # 组装防乱码与无 Markdown 杂质的纯文本文件
+        export_raw = ""
         if st.session_state.top_quote:
-            export_text += f"📌 一句话精髓：\n“ {st.session_state.top_quote} ”\n\n"
-        export_text += st.session_state.local_summary
+            clean_q = re.sub(r'\*\*(.*?)\*\*', r'\1', st.session_state.top_quote)
+            export_raw += f"📌 一句话精髓：\n“ {clean_q} ”\n\n"
+        
+        clean_sum = re.sub(r'\*\*(.*?)\*\*', r'\1', st.session_state.local_summary)
+        clean_sum = re.sub(r'`(.*?)`', r'\1', clean_sum)
+        clean_sum = re.sub(r'#+\s*', '', clean_sum)
+        export_raw += clean_sum
+
+        # 强制使用 UTF-8-SIG 编码添加 BOM 头，防止手机端解包乱码
+        export_bytes = export_raw.encode("utf-8-sig")
 
         st.download_button(
             label="💾 保存每日笔记 (.txt)",
-            data=export_text,
+            data=export_bytes,
             file_name="daily_knowledge_note.txt",
-            mime="text/plain",
+            mime="text/plain; charset=utf-8",
             use_container_width=True,
         )
 
 if st.session_state.summary_audio_bytes:
-    render_custom_media_player(st.session_state.summary_audio_bytes, title="速读总结音频", artist="随身听书 & 思维助手")
+    render_custom_media_player(st.session_state.summary_audio_bytes, title="速读总结音频", artist="随身听书 & 思维助手", player_key="summary")
     st.download_button(
         "📥 下载总结速读 MP3",
         data=st.session_state.summary_audio_bytes,
