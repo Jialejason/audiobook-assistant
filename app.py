@@ -487,7 +487,6 @@ def parse_multi_role_script(text):
     male_keywords = ["他", "男", "先生", "少爷", "爸爸", "父亲", "爷爷", "哥", "叔", "师父", "队长", "老者", "皇上", "兄", "师兄", "老道", "少年", "汉子", "小哥", "老头", "王", "爷", "老兄", "叔叔", "叔父"]
     female_keywords = ["她", "女", "小姐", "夫人", "妈妈", "母亲", "奶奶", "姐", "妹", "姨", "师姐", "丫头", "皇后", "娘", "姑娘", "少女", "大娘", "阿姨", "嫂", "妹妹", "姐姐", "媳妇", "婆婆", "妹子"]
 
-    # 使用 [\s\S] 确保正则正确包含带有换行符的多行对话
     pattern = r'(“[\s\S]*?”|"[^"]*"|「[\s\S]*?」|『[\s\S]*?』)'
     raw_segments = re.split(pattern, text)
     
@@ -860,7 +859,12 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
         if ducked_chunks:
             ducked_bgm = ducked_chunks[0]
             for c in ducked_chunks[1:]:
-                ducked_bgm = ducked_bgm.append(c, crossfade=15)
+                # 🛠️ 核心修复：动态计算安全淡化值，防止尾部音轨片段小于 15ms 时引发 Pydub 崩溃
+                safe_crossfade = min(15, len(ducked_bgm) // 2, len(c) // 2)
+                if safe_crossfade > 0:
+                    ducked_bgm = ducked_bgm.append(c, crossfade=safe_crossfade)
+                else:
+                    ducked_bgm = ducked_bgm.append(c, crossfade=0)
         else:
             ducked_bgm = bgm.apply_gain(bgm_base_gain)
 
@@ -1329,7 +1333,6 @@ if st.session_state.local_summary:
                     st.error(f"生成失败: {e}")
 
     with sub_col2:
-        # 组装防乱码与无 Markdown 杂质的纯文本文件
         export_raw = ""
         if st.session_state.top_quote:
             clean_q = re.sub(r'\*\*(.*?)\*\*', r'\1', st.session_state.top_quote)
@@ -1340,7 +1343,6 @@ if st.session_state.local_summary:
         clean_sum = re.sub(r'#+\s*', '', clean_sum)
         export_raw += clean_sum
 
-        # 强制使用 UTF-8-SIG 编码添加 BOM 头，防止手机端解包乱码
         export_bytes = export_raw.encode("utf-8-sig")
 
         st.download_button(
