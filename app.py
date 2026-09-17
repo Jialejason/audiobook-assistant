@@ -148,7 +148,6 @@ st.caption(
 with st.sidebar:
     st.header("⚙️ 朗读模式与引擎设置")
     
-    # 🌟 核心升级：明确解封单人朗读与多角色广播剧模式
     audio_mode = st.radio(
         "🎙️ 选择音频合成模式：",
         ["🎙️ 单人沉浸朗读 (专注听书)", "🎭 全自动 AI 广播剧 (男女多角色)"],
@@ -512,7 +511,7 @@ rate_percentage = int(round((speech_rate_val - 1.0) * 100))
 rate_str = f"{rate_percentage:+d}%"
 
 # --------------------------------------------------
-# 6. 输入界面（画圈四大导入方式完全解包平权）
+# 6. 输入界面
 # --------------------------------------------------
 st.subheader("📥 导入阅读内容")
 input_mode = st.radio(
@@ -657,7 +656,7 @@ if len(raw_text) > 8000:
     active_process_text = auto_chapters[selected_ch_idx]["content"]
 
 # --------------------------------------------------
-# 7. TTS 合成 + 高通滤波 + 动态闪避 (Audio Ducking 彻底修复版)
+# 7. TTS 合成 + 高通滤波 + 动态闪避 (已修正 dbFS 属性 Bug)
 # --------------------------------------------------
 def clean_markdown_for_speech(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -733,7 +732,7 @@ async def synth_single_chunk_cached(chunk, voice, rate_str, sem=None):
     else:
         return await do_synth()
 
-# 🌟 核心升级：彻底修复 Pydub 动态闪避混音 Bug
+# 🌟 修复关键：将 speech_chunk.dbfs 修改为正确的 Pydub 属性 speech_chunk.dbFS
 def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
     if not HAS_PYDUB or not FFMPEG_READY or not speech_bytes:
         return speech_bytes
@@ -778,7 +777,8 @@ def mix_bgm_with_audio(speech_bytes, bgm_choice_name, volume_percent=15):
             speech_chunk = speech[i:i+chunk_ms]
             bgm_chunk = bgm[i:i+chunk_ms]
 
-            target_duck = -6.0 if speech_chunk.dbfs > -42.0 else 0.0
+            # ✅ 此处已修正为 dbFS (Decibels relative to Full Scale)
+            target_duck = -6.0 if speech_chunk.dbFS > -42.0 else 0.0
             current_duck = current_duck * 0.7 + target_duck * 0.3
 
             adjusted_chunk = bgm_chunk.apply_gain(bgm_base_gain + current_duck)
